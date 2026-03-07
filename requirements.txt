@@ -1,0 +1,5 @@
+scapy
+pycryptodome
+cryptography
+requests
+requests-toolbelt
