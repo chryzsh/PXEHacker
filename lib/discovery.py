@@ -8,7 +8,7 @@ import socket
 import ipaddress
 
 from scapy.all import (
-    conf, srp1, bind_layers, resolve_iface,
+    conf, srp, bind_layers, resolve_iface,
     get_if_addr, get_if_hwaddr, get_if_raw_addr,
     Ether, IP, UDP, BOOTP, DHCP,
     inet_ntop,
@@ -23,6 +23,14 @@ def _decode_network_value(value):
     if isinstance(value, bytes):
         value = value.rstrip(b"\0").decode("utf-8", errors="ignore")
     return value.strip() or None
+
+
+def _get_dhcp_option(dhcp_options, *names):
+    """Return the first DHCP option value matching any provided name."""
+    for opt in dhcp_options:
+        if isinstance(opt, tuple) and opt[0] in names:
+            return opt[1]
+    return None
 
 
 def _resolve_hostname(host):
@@ -110,43 +118,131 @@ class PXEDiscovery:
             BOOTP(chaddr=self.client_mac) /
             DHCP(options=[
                 ("message-type", "discover"),
-                ('param_req_list', [1, 3, 6, 66, 67]),
+                ("vendor_class_id", b"PXEClient"),
+                ("pxe_client_architecture", b"\x00\x00"),
+                ("pxe_client_machine_identifier", b"\x00*\x8cM\x9d\xc1lBA\x83\x87\xef\xc6\xd8s\xc6\xd2"),
+                ('param_req_list', [1, 3, 6, 60, 66, 67, 93, 94, 97]),
                 "end"
             ])
         )
 
         conf.checkIPaddr = False
-        ans = srp1(pkt, timeout=timeout, verbose=0)
-        conf.checkIPaddr = True
+        try:
+            answered, _ = srp(pkt, timeout=timeout, multi=True, verbose=0)
+        finally:
+            conf.checkIPaddr = True
 
-        if not ans:
+        if not answered:
             print("[-] No DHCP responses received with PXE boot options")
             return None
 
-        dhcp_options = ans[DHCP].options
-        tftp_server = _decode_network_value(
-            next((opt[1] for opt in dhcp_options if isinstance(opt, tuple) and opt[0] == "tftp_server_name"), None)
-        )
-        boot_file = _decode_network_value(
-            next((opt[1] for opt in dhcp_options if isinstance(opt, tuple) and opt[0] == "boot-file-name"), None)
-        )
+        offers = []
+        for _, ans in answered:
+            if not ans.haslayer(DHCP):
+                continue
 
-        # Fallback to BOOTP fields
-        if tftp_server is None and ans.haslayer(BOOTP):
-            bootp = ans[BOOTP]
-            if bootp.siaddr and bootp.siaddr != "0.0.0.0":
-                tftp_server = bootp.siaddr
-            else:
-                tftp_server = _decode_network_value(
-                    next((opt[1] for opt in dhcp_options if isinstance(opt, tuple) and opt[0] == "server_id"), None)
-                )
-            if boot_file is None:
+            dhcp_options = ans[DHCP].options
+            bootp = ans[BOOTP] if ans.haslayer(BOOTP) else None
+            source_ip = ans[IP].src if ans.haslayer(IP) else None
+            source_port = ans[UDP].sport if ans.haslayer(UDP) else None
+
+            tftp_server_name = _decode_network_value(
+                _get_dhcp_option(dhcp_options, "tftp_server_name")
+            )
+            boot_file = _decode_network_value(
+                _get_dhcp_option(dhcp_options, "boot-file-name")
+            )
+            server_id = _decode_network_value(
+                _get_dhcp_option(dhcp_options, "server_id")
+            )
+            vendor_class = _decode_network_value(
+                _get_dhcp_option(dhcp_options, "vendor_class_id")
+            )
+
+            siaddr = None
+            if bootp is not None and bootp.siaddr and bootp.siaddr != "0.0.0.0":
+                siaddr = bootp.siaddr
+
+            if boot_file is None and bootp is not None:
                 boot_file = _decode_network_value(bootp.file)
 
-        if tftp_server is None:
-            print("[-] DHCP responded but no PXE server found in option 66, BOOTP siaddr, or server_id")
+            tftp_server = None
+            score = 0
+            markers = []
+            looks_like_pxe = False
+
+            if tftp_server_name:
+                tftp_server = tftp_server_name
+                score += 100
+                markers.append("option66")
+                looks_like_pxe = True
+
+            if boot_file:
+                score += 60
+                markers.append("bootfile")
+                looks_like_pxe = True
+
+            if source_port == 4011:
+                score += 40
+                markers.append("udp4011")
+                looks_like_pxe = True
+
+            if vendor_class and "PXE" in vendor_class.upper():
+                score += 20
+                markers.append("vendor_class")
+                looks_like_pxe = True
+
+            if siaddr:
+                if tftp_server is None:
+                    tftp_server = siaddr
+                score += 10
+                markers.append("siaddr")
+
+            # Only trust server_id/source_ip when the reply already looks PXE-related.
+            if tftp_server is None and server_id and looks_like_pxe:
+                tftp_server = server_id
+                score += 10
+                markers.append("server_id")
+
+            if tftp_server is None and source_ip and looks_like_pxe:
+                tftp_server = source_ip
+                markers.append("source_ip")
+
+            offers.append({
+                "source_ip": source_ip or "<unknown>",
+                "server_id": server_id,
+                "tftp_server": tftp_server,
+                "boot_file": boot_file,
+                "score": score,
+                "markers": markers,
+                "looks_like_pxe": looks_like_pxe,
+            })
+
+        pxe_offers = [
+            offer for offer in offers
+            if offer["looks_like_pxe"] and offer["tftp_server"]
+        ]
+
+        if not pxe_offers:
+            seen = ", ".join(sorted({offer["source_ip"] for offer in offers})) or "<none>"
+            print(f"[-] Received DHCP replies, but none looked like PXE/proxyDHCP offers")
+            print(f"[*] DHCP responders seen: {seen}")
             print("[*] If you know the DP IP, use the 'attack' subcommand directly")
             return None
+
+        pxe_offers.sort(key=lambda offer: (offer["score"], bool(offer["boot_file"])), reverse=True)
+        best_offer = pxe_offers[0]
+
+        non_pxe_sources = sorted({
+            offer["source_ip"]
+            for offer in offers
+            if offer not in pxe_offers
+        })
+        if non_pxe_sources:
+            print(f"[*] Ignored non-PXE DHCP replies from: {', '.join(non_pxe_sources)}")
+
+        tftp_server = best_offer["tftp_server"]
+        boot_file = best_offer["boot_file"]
 
         # Resolve hostname if needed
         try:

@@ -22,10 +22,11 @@ class TFTPClient:
         filedata = bytearray()
         expected_block = 1
         last_ack = None
+        transfer_addr = (self.target, self.port)
 
         for attempt in range(retries):
             try:
-                data = self.socks_client.recv(9076, timeout=timeout)
+                data, transfer_addr = self.socks_client.recvfrom(9076, timeout=timeout)
                 break
             except Exception:
                 if attempt < retries - 1:
@@ -42,10 +43,10 @@ class TFTPClient:
             if opcode == 6:
                 # ACK block 0 to accept options
                 ack = struct.pack(">HH", 4, 0)
-                self.socks_client.send(ack, (self.target, self.port))
+                self.socks_client.send(ack, transfer_addr)
                 last_ack = ack
                 try:
-                    data = self.socks_client.recv(9076, timeout=timeout)
+                    data, transfer_addr = self.socks_client.recvfrom(9076, timeout=timeout)
                 except Exception:
                     print("[!] TFTP: Timed out after OACK acknowledgment")
                     return None
@@ -78,7 +79,7 @@ class TFTPClient:
 
             # Send ACK for the received block
             ack = struct.pack(">HH", 4, block)
-            self.socks_client.send(ack, (self.target, self.port))
+            self.socks_client.send(ack, transfer_addr)
             last_ack = ack
 
             # Last block — transfer complete (data < 512 bytes)
@@ -89,15 +90,13 @@ class TFTPClient:
             got_response = False
             for retry in range(retries):
                 try:
-                    data = self.socks_client.recv(9076, timeout=timeout)
+                    data, transfer_addr = self.socks_client.recvfrom(9076, timeout=timeout)
                     got_response = True
                     break
                 except Exception:
                     if retry < retries - 1:
                         # Re-send last ACK
-                        self.socks_client.send(last_ack, (self.target, self.port))
+                        self.socks_client.send(last_ack, transfer_addr)
                     else:
                         print(f"[!] TFTP: Timed out waiting for block {expected_block} after {retries} retries")
                         return bytes(filedata) if filedata else None
-
-        return bytes(filedata)

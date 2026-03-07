@@ -4,7 +4,7 @@ class SOCKS5Client:
     def __init__(self, proxy_host, proxy_port):
         self.proxy_host = proxy_host
         self.proxy_port = proxy_port
-        self.proxy_sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        self.proxy_sd = None
         self.relay_sd = None
 
         # Need a port that the relay allows connections from when forwarding UDP
@@ -14,19 +14,24 @@ class SOCKS5Client:
         try:
             socket.inet_aton(host)
             return True
-        except:
+        except (socket.error, OSError, ValueError):
             return False
 
     def _is_domain(self, host):
         return not self._is_ip(host)
 
     def close(self):
-        self.proxy_sd.close()
+        if self.proxy_sd:
+            self.proxy_sd.close()
+            self.proxy_sd = None
         if self.relay_sd:
             self.relay_sd.close()
+            self.relay_sd = None
 
     def connect(self):
         try:
+            self.close()
+            self.proxy_sd = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
             self.proxy_sd.connect((self.proxy_host, self.proxy_port))
 
             # Send Negotiation (no auth)
@@ -64,8 +69,10 @@ class SOCKS5Client:
             self.relay_sd.connect((self.proxy_host, self.relay_dst_port))
 
         except SOCKS5ClientException:
+            self.close()
             raise
         except Exception as e:
+            self.close()
             raise SOCKS5ClientException(f"Error connecting to proxy: {e}")
 
     def send(self, data, destination):
@@ -74,7 +81,7 @@ class SOCKS5Client:
         relay_header = b'\x00\x00\x00\x01' + socket.inet_aton(destination[0]) + destination[1].to_bytes(2, 'big')
         self.relay_sd.send(relay_header + data)
 
-    def recv(self, size, timeout=10):
+    def recvfrom(self, size, timeout=10):
         self.relay_sd.settimeout(timeout)
         try:
             data = self.relay_sd.recv(size)
@@ -89,14 +96,22 @@ class SOCKS5Client:
 
         # Validate if the header has an IP or domain name
         if data[3] == 1:
-            return data[10:]
+            host = socket.inet_ntoa(data[4:8])
+            port = int.from_bytes(data[8:10], 'big')
+            return data[10:], (host, port)
 
         elif data[3] == 3:
             domain_len = data[4]
-            return data[5+domain_len+2:]
+            host = data[5:5+domain_len].decode()
+            port = int.from_bytes(data[5+domain_len:5+domain_len+2], 'big')
+            return data[5+domain_len+2:], (host, port)
 
         else:
             raise SOCKS5ClientException("Received packet has an invalid header")
+
+    def recv(self, size, timeout=10):
+        data, _ = self.recvfrom(size, timeout=timeout)
+        return data
 
 class SOCKS5ClientException(Exception):
     pass
@@ -116,10 +131,14 @@ class DirectUDPClient:
     def send(self, data, destination):
         self.sd.sendto(data, destination)
 
-    def recv(self, size, timeout=10):
+    def recvfrom(self, size, timeout=10):
         self.sd.settimeout(timeout)
         try:
             data, addr = self.sd.recvfrom(size)
         except socket.timeout:
             raise SOCKS5ClientException(f"Timed out waiting for response after {timeout}s")
+        return data, addr
+
+    def recv(self, size, timeout=10):
+        data, _ = self.recvfrom(size, timeout=timeout)
         return data

