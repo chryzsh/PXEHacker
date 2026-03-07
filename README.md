@@ -21,8 +21,8 @@ Merges the best of [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR Cyb
 ```bash
 cd ~/share/dev/PXEHacker
 uv venv --clear
-uv pip install -r requirements.txt
 source .venv/bin/activate
+uv pip install -r requirements.txt
 ```
 
 Requirements: Python 3.8+, Linux (primary platform), `uv`.
@@ -298,6 +298,17 @@ These are candidates for a future BOF (Beacon Object File) implementation.
 - [Misconfiguration Manager](https://github.com/subat0mik/Misconfiguration-Manager) — SCCM attack research
 - DEF CON 30 talk: "Pulling Passwords out of Configuration Manager"
 
+## Provenance
+
+This project was developed with assistance from a large language model under human direction. A human operator defined the goals, reviewed the code, chose the changes, and validated the results.
+
 ## License
 
 This tool is for authorized security testing only. Ensure you have written authorization before using against any target.
+
+License status is not fully settled for all upstream-derived portions of this repository:
+
+- `PXEThief` is GPL-3.0. This repository contains code and logic derived from PXEThief.
+- No license file was found in the local `cred1py` snapshot, and the upstream GitHub repository metadata did not report a license as of March 7, 2026.
+
+See [PROVENANCE.md](./PROVENANCE.md) for the attribution and license review notes before redistributing this repository publicly.
