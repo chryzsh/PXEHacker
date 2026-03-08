@@ -64,7 +64,6 @@ class SOCKS5Client:
                 raise SOCKS5ClientException("Invalid relay address type")
 
             # Create the UDP relay socket once (not per-send)
-            print(f"[*] SOCKS5 UDP relay: server returned {self.relay_dst}:{self.relay_dst_port}")
             self.relay_sd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             self.relay_sd.bind(('', self.relay_src_port))
             self.relay_sd.connect((self.proxy_host, self.relay_dst_port))

@@ -10,13 +10,12 @@ sys.path.insert(0, '/home/chrisr/share/dev/PXEHacker')
 from lib.socks import SOCKS5Client
 
 def build_dns_query(domain):
-    """Build a simple DNS A record query."""
     header = struct.pack('>HHHHHH', 0x1337, 0x0100, 1, 0, 0, 0)
     question = b''
     for label in domain.split('.'):
         question += bytes([len(label)]) + label.encode()
     question += b'\x00'
-    question += struct.pack('>HH', 1, 1)  # Type A, Class IN
+    question += struct.pack('>HH', 1, 1)
     return header + question
 
 def parse_dns_response(data):
@@ -28,7 +27,6 @@ def parse_dns_response(data):
     return f"txid=0x{txid:04x}, rcode={rcodes.get(rcode, rcode)}, answers={ancount}"
 
 def build_bootp_packet(client_ip):
-    """Build a minimal BOOTP/DHCP PXE request (same as what pxehacker sends)."""
     from scapy.layers.dhcp import BOOTP, DHCP
     pkt = BOOTP(ciaddr=client_ip, chaddr="11:22:33:44:55:66") / DHCP(options=[
         ("message-type", "request"),
@@ -39,47 +37,6 @@ def build_bootp_packet(client_ip):
         ('pxe_client_machine_identifier', b'\x00*\x8cM\x9d\xc1lBA\x83\x87\xef\xc6\xd8s\xc6\xd2'),
         "end"])
     return bytes(pkt)
-
-def test_dns(client, dns_server, domain='sccm.lab'):
-    print(f"\n--- Test 1: DNS query for '{domain}' via {dns_server}:53 ---")
-    query = build_dns_query(domain)
-    client.send(query, (dns_server, 53))
-    try:
-        data = client.recv(4096, timeout=5)
-        print(f"[+] DNS response: {parse_dns_response(data)}")
-        return True
-    except Exception as e:
-        print(f"[-] DNS failed: {e}")
-        return False
-
-def test_pxe(client, pxe_server, client_ip):
-    print(f"\n--- Test 2: BOOTP/PXE request to {pxe_server}:4011 (ciaddr={client_ip}) ---")
-    pkt = build_bootp_packet(client_ip)
-    print(f"[*] BOOTP packet size: {len(pkt)} bytes")
-    print(f"[*] First 32 bytes: {pkt[:32].hex()}")
-    # Show the ciaddr field (bytes 12-16 of BOOTP)
-    print(f"[*] ciaddr in packet: {socket.inet_ntoa(pkt[12:16])}")
-    client.send(pkt, (pxe_server, 4011))
-    try:
-        data = client.recv(9076, timeout=15)
-        print(f"[+] Got PXE response! ({len(data)} bytes)")
-        print(f"[+] First 32 bytes: {data[:32].hex()}")
-        return True
-    except Exception as e:
-        print(f"[-] PXE failed: {e}")
-        return False
-
-def test_pxe_port67(client, pxe_server, client_ip):
-    print(f"\n--- Test 3: BOOTP/PXE request to {pxe_server}:67 (standard DHCP port) ---")
-    pkt = build_bootp_packet(client_ip)
-    client.send(pkt, (pxe_server, 67))
-    try:
-        data = client.recv(9076, timeout=10)
-        print(f"[+] Got DHCP response! ({len(data)} bytes)")
-        return True
-    except Exception as e:
-        print(f"[-] DHCP port 67 failed: {e}")
-        return False
 
 if __name__ == '__main__':
     if len(sys.argv) < 5:
@@ -93,36 +50,60 @@ if __name__ == '__main__':
     client_ip = sys.argv[4]
     dns_server = sys.argv[5] if len(sys.argv) > 5 else pxe_server
 
-    # Each test needs its own SOCKS connection (relay port changes)
-    # Test 1: DNS (proves relay works)
-    print(f"[*] Connecting to SOCKS5 proxy {socks_host}:{socks_port}")
+    # Test 1: DNS to the DNS server (baseline)
+    print(f"\n--- Test 1: DNS to {dns_server}:53 (baseline) ---")
     client = SOCKS5Client(socks_host, socks_port)
     try:
         client.connect()
-        print(f"[+] SOCKS5 UDP relay established")
-        test_dns(client, dns_server)
+        client.send(build_dns_query('sccm.lab'), (dns_server, 53))
+        data = client.recv(4096, timeout=5)
+        print(f"[+] DNS to {dns_server}: {parse_dns_response(data)}")
     except Exception as e:
-        print(f"[-] SOCKS5 setup failed: {e}")
-        sys.exit(1)
+        print(f"[-] Failed: {e}")
     finally:
         client.close()
 
-    # Test 2: PXE on port 4011
+    # Test 2: DNS to the PXE SERVER (can relay reach .142 at all?)
+    print(f"\n--- Test 2: DNS to {pxe_server}:53 (reachability check) ---")
     client = SOCKS5Client(socks_host, socks_port)
     try:
         client.connect()
-        test_pxe(client, pxe_server, client_ip)
+        client.send(build_dns_query('sccm.lab'), (pxe_server, 53))
+        data = client.recv(4096, timeout=5)
+        print(f"[+] DNS to {pxe_server}: {parse_dns_response(data)}")
     except Exception as e:
-        print(f"[-] Error: {e}")
+        print(f"[-] DNS to {pxe_server} failed: {e} (might not run DNS, that's ok)")
+
     finally:
         client.close()
 
-    # Test 3: Try standard DHCP port 67 as fallback
+    # Test 3: Send BOOTP packet to DNS server port 53 (size/relay test)
+    # If the relay forwards the 314-byte BOOTP as a DNS query, we should get FORMERR back
+    print(f"\n--- Test 3: Send BOOTP packet to {dns_server}:53 (does relay forward large packets?) ---")
     client = SOCKS5Client(socks_host, socks_port)
     try:
         client.connect()
-        test_pxe_port67(client, pxe_server, client_ip)
+        pkt = build_bootp_packet(client_ip)
+        print(f"[*] Sending {len(pkt)}-byte BOOTP packet to DNS port as test")
+        client.send(pkt, (dns_server, 53))
+        data = client.recv(4096, timeout=5)
+        print(f"[+] Got response ({len(data)} bytes) - relay forwards large packets fine")
     except Exception as e:
-        print(f"[-] Error: {e}")
+        print(f"[-] Failed: {e}")
+    finally:
+        client.close()
+
+    # Test 4: Actual PXE request
+    print(f"\n--- Test 4: BOOTP/PXE request to {pxe_server}:4011 ---")
+    client = SOCKS5Client(socks_host, socks_port)
+    try:
+        client.connect()
+        pkt = build_bootp_packet(client_ip)
+        print(f"[*] ciaddr={socket.inet_ntoa(pkt[12:16])}, size={len(pkt)} bytes")
+        client.send(pkt, (pxe_server, 4011))
+        data = client.recv(9076, timeout=15)
+        print(f"[+] Got PXE response! ({len(data)} bytes)")
+    except Exception as e:
+        print(f"[-] PXE failed: {e}")
     finally:
         client.close()
