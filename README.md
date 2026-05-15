@@ -112,6 +112,16 @@ Decrypt a previously downloaded `.boot.var` / `variables.dat` file with a known 
 .venv/bin/python pxehacker.py decrypt <file> <key_hex> [-o OUTPUT]
 ```
 
+### `derive-key` — Derive blank-password key from a captured DHCP cryptokey
+
+Use when you only have a `.boot.var` file but captured the PXE server's DHCP response separately (e.g. via Wireshark). Takes the encrypted cryptokey blob from DHCP option 243 sub-record type 2 and prints the AES key for offline decryption.
+
+```bash
+.venv/bin/python pxehacker.py derive-key <cryptokey_hex> [-f <file>] [-o OUTPUT]
+```
+
+Pass `-f <file>` to decrypt the `.boot.var` in one step; otherwise the printed key can be fed to `decrypt`.
+
 ### `hash` — Extract hashcat hash
 
 Extract a crackable hash from a password-protected media file.
@@ -253,7 +263,8 @@ The SOCKS5 client establishes a TCP connection for the control channel, then use
 
 **Blank Password (No PXE Password Set):**
 - DHCP Option 243 Type 2 contains an encrypted key stream
-- Decrypted using hardcoded key from tspxe.dll: `9F679C9B373A1F48824F3787333DE24E9`
+- Decrypted using hardcoded key from tspxe.dll: `9F679C9B373A1F48824F378733DE24E9`
+- Note: this is a key-encryption-key, *not* the AES key for the `.var` file. It only unwraps the per-deployment cryptokey that the server hands out in DHCP option 243 (sub-record type 2). Each PXE deployment has a different final key; see `derive-key` below.
 - Bit extension algorithm converts 10-byte result to 20-byte AES key
 
 **Policy Credential Obfuscation:**

