@@ -136,7 +136,18 @@ with hashcat modes `19850`/`19851` from `chryzsh/hashcat-6.2.6-SCCM` (see
 `pxehacker.py`'s `HASHCAT_MODES` / `print_hashcat_command`) — don't strip the
 mode number back out, operators need the ready-to-run command.
 
-### 4.11 Legacy CALG_3DES cryptokey wrapping is unverified
+### 4.11 MAC and PXE machine identifier are randomized per run — don't hardcode them back
+`attack` used to send a literal `chaddr=11:22:33:44:55:66`, and `lib/sccm.py` /
+`lib/discovery.py` both sent the exact same static 16-byte
+`pxe_client_machine_identifier` (DHCP option 97) on every request. That's a
+static, tool-wide fingerprint any blue team logging PXE/DHCP traffic can
+trivially alert on. Both are now randomized per run (`generate_random_mac()`
+in `pxehacker.py`, `os.urandom(16)` for the machine identifier in
+`send_bootp_request()` and `PXEDiscovery.discover()`). `attack` also accepts
+`--mac` to pin a specific MAC when an engagement requires it. Don't
+reintroduce a fixed value for either.
+
+### 4.12 Legacy CALG_3DES cryptokey wrapping is unverified
 `SCCM.derive_blank_decryption_key()` has a 3DES branch (`inner_alg_id ==
 0x6603`) ported from `blurbdust/PXEThief` for older sites that wrap the
 blank-password cryptokey with 3DES instead of AES. It has never been tested

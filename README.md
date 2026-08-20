@@ -86,7 +86,7 @@ sudo "$(pwd)/.venv/bin/python" pxehacker.py discover [-i INTERFACE] [-t TIMEOUT]
 Sends a crafted DHCP/PXE request to the target DP, downloads the encrypted media variables file via TFTP, and attempts decryption.
 
 ```bash
-.venv/bin/python pxehacker.py attack <target> <src_ip> [socks_host socks_port] [-p PASSWORD] [-o OUTPUT]
+.venv/bin/python pxehacker.py attack <target> <src_ip> [socks_host socks_port] [-p PASSWORD] [-o OUTPUT] [--mac MAC]
 ```
 
 | Argument | Description |
@@ -97,12 +97,14 @@ Sends a crafted DHCP/PXE request to the target DP, downloads the encrypted media
 | `socks_port` | SOCKS5 proxy port (omit for direct UDP) |
 | `-p` | Pre-cracked password in hex (for password-protected PXE) |
 | `-o` | Output directory (default: `./loot`) |
+| `--mac` | Source MAC for the PXE boot request (random, locally-administered MAC generated per run if omitted) |
 
 **What happens:**
 - If **no PXE password** is set: the tool derives the decryption key automatically from the DHCP response and decrypts the media file.
-- If a **PXE password is set**: the tool outputs a hashcat-compatible hash for offline cracking. Re-run with `-p <cracked_hex>` after cracking.
-- On success, writes `variables.xml`, PFX certificate, and `loot_summary.txt` to the output directory.
+- If a **PXE password is set**: the tool first tries the blank password plus a short list of common weak/default passwords locally; if none match, it outputs a hashcat-compatible hash for offline cracking. Re-run with `-p <cracked_hex>` after cracking.
+- On success, writes `variables.xml`, PFX certificate, and `loot_summary.txt` to the output directory, and prints the next-step `policies` command.
 - The tool prints the BCD file path, but does not download the `.boot.bcd`.
+- The client MAC and the PXE client machine identifier (DHCP option 97) are randomized every run by default — a fixed value on either would be a static, tool-wide fingerprint for defenders monitoring PXE traffic.
 
 ### `decrypt` — Offline media decryption
 

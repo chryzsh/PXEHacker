@@ -4,6 +4,7 @@ Ported from PXEThief's find_pxe_server() and configure_scapy_networking(),
 adapted for Linux-only operation without settings.ini.
 """
 
+import os
 import socket
 import ipaddress
 
@@ -111,6 +112,10 @@ class PXEDiscovery:
         """
         print("[*] Sending DHCP Discover to find PXE boot servers...")
 
+        # Type byte + random GUID — a fixed identifier here would be a static,
+        # tool-wide fingerprint on every PXE discovery broadcast.
+        machine_identifier = b"\x00" + os.urandom(16)
+
         pkt = (
             Ether(dst="ff:ff:ff:ff:ff:ff") /
             IP(src="0.0.0.0", dst="255.255.255.255") /
@@ -120,7 +125,7 @@ class PXEDiscovery:
                 ("message-type", "discover"),
                 ("vendor_class_id", b"PXEClient"),
                 ("pxe_client_architecture", b"\x00\x00"),
-                ("pxe_client_machine_identifier", b"\x00*\x8cM\x9d\xc1lBA\x83\x87\xef\xc6\xd8s\xc6\xd2"),
+                ("pxe_client_machine_identifier", machine_identifier),
                 ('param_req_list', [1, 3, 6, 60, 66, 67, 93, 94, 97]),
                 "end"
             ])
