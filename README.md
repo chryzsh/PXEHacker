@@ -124,15 +124,15 @@ Pass `-f <file>` to decrypt the `.boot.var` in one step; otherwise the printed k
 
 ### `hash` — Extract hashcat hash
 
-Extract a crackable hash from a password-protected media file.
+Tries the blank password plus a short list of common weak/default PXE media passwords locally first; if none match, extracts a crackable hash from the password-protected media file.
 
 ```bash
-.venv/bin/python pxehacker.py hash <file>
+.venv/bin/python pxehacker.py hash <file> [-o OUTPUT]
 ```
 
 Output format: `$sccm$aes128$<header_hex>` or `$sccm$aes256$<header_hex>`
 
-For AES-256 cracking, see: https://github.com/chryzsh/hashcat-6.2.6-SCCM
+Crack with [chryzsh/hashcat-6.2.6-SCCM](https://github.com/chryzsh/hashcat-6.2.6-SCCM) — mode `19850` for AES-128, `19851` for AES-256. The `hash` and `attack` commands print the exact `hashcat -m <mode> -a 0 '<hash>' wordlist.txt` command to run.
 
 ### `policies` — Retrieve SCCM policies
 
@@ -265,7 +265,12 @@ The SOCKS5 client establishes a TCP connection for the control channel, then use
 - DHCP Option 243 Type 2 contains an encrypted key stream
 - Decrypted using hardcoded key from tspxe.dll: `9F679C9B373A1F48824F378733DE24E9`
 - Note: this is a key-encryption-key, *not* the AES key for the `.var` file. It only unwraps the per-deployment cryptokey that the server hands out in DHCP option 243 (sub-record type 2). Each PXE deployment has a different final key; see `derive-key` below.
+- Inner encryption of that cryptokey is AES-128 by default; AES-256 and legacy CALG_3DES sites are also detected and handled (3DES path ported from blurbdust/PXEThief and not yet verified against a live capture)
 - Bit extension algorithm converts 10-byte result to 20-byte AES key
+
+**Weak/Default Password Fallback:**
+- Before requiring offline hash cracking, `hash` and `attack` (when no cryptokey and no `-p`) try the blank password plus ~20 common defaults (`password`, `admin`, `qwerty`, `P@ssw0rd`, etc.) locally against the media file
+- Ported from evildaemond/pxethiefup's `test_default_weak_passwords_on_media`
 
 **Policy Credential Obfuscation:**
 - Supports 3DES (0x6603), AES-128 (0x660E), AES-192 (0x660F), AES-256 (0x6610)
@@ -301,11 +306,15 @@ The following PXEThief features require Windows APIs and are not implemented:
 
 These are candidates for a future BOF (Beacon Object File) implementation.
 
+Also out of scope: **client-registration-based NAA credential harvesting** (`sccmwtf.py`, present in both evildaemond/pxethiefup and blurbdust/PXEThief, originally from [xpn/sccmwtf](https://github.com/xpn/sccmwtf)). This registers a fake SCCM client over HTTP to pull policies — a fundamentally different, non-PXE/non-TFTP attack surface. Reviewed but intentionally not integrated; a candidate for a separate standalone tool rather than a PXEHacker feature.
+
 ## Credits
 
 - [PXEThief](https://github.com/MWR-CyberSec/PXEThief) by Christopher Panayi (MWR CyberSec) — original Windows PXE attack tool
 - [cred1py](https://github.com/SpecterOps/cred1py) by SpecterOps — SOCKS5-enabled CRED-1 implementation
 - [pxethiefy](https://github.com/csandker/pxethiefy) by Christian Sandker — Linux port of PXEThief
+- [pxethiefup](https://github.com/evildaemond/pxethiefup) by Adam Jon Foster — weak/default password auto-try, hashcat mode wiring
+- [PXEThief (blurbdust fork)](https://github.com/blurbdust/PXEThief) — legacy CALG_3DES cryptokey handling
 - [Misconfiguration Manager](https://github.com/subat0mik/Misconfiguration-Manager) — SCCM attack research
 - DEF CON 30 talk: "Pulling Passwords out of Configuration Manager"
 

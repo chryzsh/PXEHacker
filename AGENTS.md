@@ -119,6 +119,30 @@ They require local registry access on a Windows MP/DP. Documented as future BOF
 candidates in conversation history. Don't try to port them as Python — they
 don't belong here.
 
+### 4.9 `sccmwtf.py` (client-registration NAA harvesting) is a different tool, not a PXEHacker feature
+Both `evildaemond/pxethiefup` and `blurbdust/PXEThief` bundle a `sccmwtf.py`
+(originally `xpn/sccmwtf`) that registers a fake SCCM client over HTTP to pull
+policies and NAA creds — no PXE, no TFTP, no DHCP involved. It was reviewed
+(2026-08-20) and intentionally left out: it's a different attack surface than
+this project's PXE/TFTP scope. If it's ever wanted, it belongs as a separate
+tool, not bolted onto `lib/`.
+
+### 4.10 Weak/default passwords and hashcat mode are wired together
+`lib/sccm.py`'s `SCCM.try_weak_passwords()` tries the blank password plus a
+short list of common defaults (ported from `pxethiefup`'s
+`test_default_weak_passwords_on_media`) before `hash`/`attack` fall back to
+printing a `$sccm$aes128$...`/`$sccm$aes256$...` hash. The hash output pairs
+with hashcat modes `19850`/`19851` from `chryzsh/hashcat-6.2.6-SCCM` (see
+`pxehacker.py`'s `HASHCAT_MODES` / `print_hashcat_command`) — don't strip the
+mode number back out, operators need the ready-to-run command.
+
+### 4.11 Legacy CALG_3DES cryptokey wrapping is unverified
+`SCCM.derive_blank_decryption_key()` has a 3DES branch (`inner_alg_id ==
+0x6603`) ported from `blurbdust/PXEThief` for older sites that wrap the
+blank-password cryptokey with 3DES instead of AES. It has never been tested
+against a real 3DES-wrapped capture — if a `derive-key` run against a legacy
+site produces garbage, this branch is the first place to check.
+
 ## 5. Operational hygiene — the loot directory
 
 `loot/` contains real captured credentials, decrypted task sequences, PFX
