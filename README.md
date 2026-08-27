@@ -4,45 +4,11 @@ SCCM PXE exploitation tool for authorized red team and penetration testing engag
 
 Merges the best of [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR CyberSec) and [cred1py](https://github.com/SpecterOps/cred1py) (SpecterOps) into a unified Linux-first CLI tool.
 
-## Disclaimer: this is a catch-all, not a novel technique
-
-The SCCM PXE credential attack (CRED-1) is not new, and PXEHacker did not invent it. By 2026 the tooling for it had fragmented across half a dozen independently maintained repositories — a Windows-only original, a couple of Linux ports, and several active forks — each carrying a different subset of fixes (AES-256 support, weak-password auto-try, legacy 3DES handling, hashcat integration) with no single one being a strict superset of the rest. Running the attack meant knowing which fork had which fix.
-
-PXEHacker exists to be that superset: one Linux-first, pure-Python, actively-maintained tool that periodically re-absorbs whatever genuinely new fixes or features show up in the projects below, so operators don't have to track five repos to get the current best version of any one capability. It is authorized-use-only tooling for red team and penetration testing engagements.
-
-## Where this fits — the SCCM PXE tooling lineage
-
-In the order each project appeared:
-
-| Date | Project | Contribution |
-|------|---------|---------------|
-| 2022-07 | [xpn/sccmwtf](https://github.com/xpn/sccmwtf) | Client-registration NAA credential harvesting — a different, non-PXE technique. Reviewed, not integrated (see [Out of Scope](#out-of-scope-windows-only-features)). |
-| 2022-08 | [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR CyberSec) | The original tool and direct ancestor of everything below — Windows-only, `win32crypt`/`lxml`-dependent, modes 1-8. GPL-3.0. |
-| 2023-10 | [pxethiefy](https://github.com/csandker/pxethiefy) (Christian Sandker) | First Linux port — dropped `win32crypt` for the PXE-request path. |
-| 2023-11 | [Misconfiguration Manager](https://github.com/subat0mik/Misconfiguration-Manager) | Not a tool, but the tradecraft/research reference (CRED-1 attack path) this whole lineage implements. |
-| 2024-04 | [hashcat-6.2.6-SCCM](https://github.com/The-Viper-One/hashcat-6.2.6-SCCM) (The-Viper-One) | Companion cracking tool — a hashcat fork adding mode `19850` for these password-protected media hashes. |
-| 2024-09 | [cred1py](https://github.com/SpecterOps/cred1py) (SpecterOps) | SOCKS5-enabled CRED-1 proof-of-concept — cleaner architecture, AES-256 auto-detection, pure-Python CMS/PKCS7. License unresolved upstream. |
-| 2024-10 | [PXEThief (blurbdust fork)](https://github.com/blurbdust/PXEThief) | Actively-maintained fork of the original — AES-256, dynamic hash-type detection, legacy CALG_3DES cryptokey handling. |
-| 2025-04 | [pxethiefup](https://github.com/evildaemond/pxethiefup) (Adam Jon Foster) | Another actively-maintained fork — weak/default password auto-try, hashcat-mode wiring. |
-| 2026-03 | [hashcat-6.2.6-SCCM (chryzsh fork)](https://github.com/chryzsh/hashcat-6.2.6-SCCM) | Extends The-Viper-One's module with AES-256 support (mode `19851`). |
-| 2026-03 | **PXEHacker** (this project) | Merges `cred1py` + `PXEThief` as the base, then continues absorbing genuinely new fixes from the forks above as they appear. |
-
-## Features
-
-- **SOCKS5 proxy support** — Run attacks through C2 beacons (Cobalt Strike, etc.)
-- **Direct UDP mode** — Local network attacks without a proxy
-- **AES-128/256 auto-detection** — Handles modern SCCM deployments
-- **Pure Python CMS/PKCS7** — No Windows or win32crypt dependency
-- **PXE server discovery** — DHCP broadcast to find Distribution Points
-- **Full attack chain** — From discovery to credential extraction
-- **Offline decryption** — Process previously captured files without network access
-- **Multi-algorithm deobfuscation** — 3DES, AES-128/192/256
-- **Hashcat hash extraction** — Offline password cracking for protected media
-
 ## Installation
 
 ```bash
-cd ~/share/dev/PXEHacker
+git clone https://github.com/chryzsh/PXEHacker.git
+cd PXEHacker
 uv venv --clear
 source .venv/bin/activate
 uv pip install -r requirements.txt
@@ -93,6 +59,18 @@ Notes:
 .venv/bin/python pxehacker.py attack <target_ip> <src_ip> <socks_host> <socks_port> -o ./loot
 .venv/bin/python pxehacker.py policies ./loot/variables.xml -o ./loot --mp http://<target_ip>
 ```
+
+## Features
+
+- **SOCKS5 proxy support** — Run attacks through C2 beacons (Cobalt Strike, etc.)
+- **Direct UDP mode** — Local network attacks without a proxy
+- **AES-128/256 auto-detection** — Handles modern SCCM deployments
+- **Pure Python CMS/PKCS7** — No Windows or win32crypt dependency
+- **PXE server discovery** — DHCP broadcast to find Distribution Points
+- **Full attack chain** — From discovery to credential extraction
+- **Offline decryption** — Process previously captured files without network access
+- **Multi-algorithm deobfuscation** — 3DES, AES-128/192/256
+- **Hashcat hash extraction** — Offline password cracking for protected media
 
 ## Subcommands
 
@@ -347,6 +325,29 @@ The following PXEThief features require Windows APIs and are not implemented:
 These are candidates for a future BOF (Beacon Object File) implementation.
 
 Also out of scope: **client-registration-based NAA credential harvesting** (`sccmwtf.py`, present in both evildaemond/pxethiefup and blurbdust/PXEThief, originally from [xpn/sccmwtf](https://github.com/xpn/sccmwtf)). This registers a fake SCCM client over HTTP to pull policies — a fundamentally different, non-PXE/non-TFTP attack surface. Reviewed but intentionally not integrated; a candidate for a separate standalone tool rather than a PXEHacker feature.
+
+## Disclaimer: this is a catch-all, not a novel technique
+
+The SCCM PXE credential attack (CRED-1) is not new, and PXEHacker did not invent it. By 2026 the tooling for it had fragmented across half a dozen independently maintained repositories — a Windows-only original, a couple of Linux ports, and several active forks — each carrying a different subset of fixes (AES-256 support, weak-password auto-try, legacy 3DES handling, hashcat integration) with no single one being a strict superset of the rest. Running the attack meant knowing which fork had which fix.
+
+PXEHacker exists to be that superset: one Linux-first, pure-Python, actively-maintained tool that periodically re-absorbs whatever genuinely new fixes or features show up in the projects below, so operators don't have to track five repos to get the current best version of any one capability. It is authorized-use-only tooling for red team and penetration testing engagements.
+
+## Where this fits — the SCCM PXE tooling lineage
+
+In the order each project appeared:
+
+| Date | Project | Contribution |
+|------|---------|---------------|
+| 2022-07 | [xpn/sccmwtf](https://github.com/xpn/sccmwtf) | Client-registration NAA credential harvesting — a different, non-PXE technique. Reviewed, not integrated (see [Out of Scope](#out-of-scope-windows-only-features)). |
+| 2022-08 | [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR CyberSec) | The original tool and direct ancestor of everything below — Windows-only, `win32crypt`/`lxml`-dependent, modes 1-8. GPL-3.0. |
+| 2023-10 | [pxethiefy](https://github.com/csandker/pxethiefy) (Christian Sandker) | First Linux port — dropped `win32crypt` for the PXE-request path. |
+| 2023-11 | [Misconfiguration Manager](https://github.com/subat0mik/Misconfiguration-Manager) | Not a tool, but the tradecraft/research reference (CRED-1 attack path) this whole lineage implements. |
+| 2024-04 | [hashcat-6.2.6-SCCM](https://github.com/The-Viper-One/hashcat-6.2.6-SCCM) (The-Viper-One) | Companion cracking tool — a hashcat fork adding mode `19850` for these password-protected media hashes. |
+| 2024-09 | [cred1py](https://github.com/SpecterOps/cred1py) (SpecterOps) | SOCKS5-enabled CRED-1 proof-of-concept — cleaner architecture, AES-256 auto-detection, pure-Python CMS/PKCS7. License unresolved upstream. |
+| 2024-10 | [PXEThief (blurbdust fork)](https://github.com/blurbdust/PXEThief) | Actively-maintained fork of the original — AES-256, dynamic hash-type detection, legacy CALG_3DES cryptokey handling. |
+| 2025-04 | [pxethiefup](https://github.com/evildaemond/pxethiefup) (Adam Jon Foster) | Another actively-maintained fork — weak/default password auto-try, hashcat-mode wiring. |
+| 2026-03 | [hashcat-6.2.6-SCCM (chryzsh fork)](https://github.com/chryzsh/hashcat-6.2.6-SCCM) | Extends The-Viper-One's module with AES-256 support (mode `19851`). |
+| 2026-03 | **PXEHacker** (this project) | Merges `cred1py` + `PXEThief` as the base, then continues absorbing genuinely new fixes from the forks above as they appear. |
 
 ## Credits
 
