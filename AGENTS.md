@@ -4,6 +4,10 @@ This file is for AI coding agents (Claude Code, Codex, etc.) working in this
 repository. Read it before touching code. The README is the user-facing doc;
 this file is the operator's manual for working *on* the code.
 
+`CLAUDE.md` in the repo root is a symlink to this file — Claude Code reads it
+under that name, everything else reads it as `AGENTS.md`. Edit this file;
+never write separate content into `CLAUDE.md`.
+
 ## 1. What this project is
 
 PXEHacker is a Linux-first, pure-Python merge of two upstream SCCM PXE attack
@@ -56,7 +60,8 @@ re-implement it in `lib/` and credit the source in a comment.
 |------------------|----------------------------------------------------------------|
 | `discover`       | DHCP broadcast to find PXE DPs (needs root, same L2 segment)   |
 | `attack`         | Full PXE flow: DHCP request -> TFTP `.var` -> derive key -> decrypt -> dump PFX + `variables.xml` |
-| `decrypt`        | Offline: decrypt a `.boot.var` given the AES key in hex        |
+| `auto`           | `attack` then, on success, automatically chains into `policies` — see §4.13 |
+| `decrypt`        | Offline: decrypt a `.boot.var` given password bytes in hex (not the raw AES key — see §4.15) |
 | `derive-key`     | Offline: derive the per-media AES key from a captured DHCP option 243 type-2 cryptokey blob (blank-password media). Optional `-f` to decrypt in one step. |
 | `hash`           | Extract `$sccm$aesNNN$...` hash for offline cracking           |
 | `loot`           | Re-extract PFX + info from an already-decrypted variables XML  |
@@ -180,6 +185,19 @@ blank-password cryptokey with 3DES instead of AES. It has never been tested
 against a real 3DES-wrapped capture — if a `derive-key` run against a legacy
 site produces garbage, this branch is the first place to check.
 
+### 4.15 `decrypt`'s `key` argument is password bytes, not the raw AES key
+`SCCM.decrypt_media_file(filedata, password)` always runs `password` through
+`aes_des_key_derivation()` before use — it's a uniform pipeline whether
+`password` came from `derive_blank_decryption_key()`'s output, a cracked
+hashcat password (UTF-16LE-encoded then hex'd), or a literal string. So
+`decrypt <file> <key_hex>` needs pre-derivation bytes, not the final AES key,
+even though the CLI historically called it a "key". Confirmed real
+confusion: found while testing this repo (2026-08-27) by naively passing an
+already-derived AES key and getting "key is likely wrong". Don't rename the
+underlying pipeline to avoid this — `derive-key`'s output is deliberately fed
+straight into it unmodified. If you touch the help text, keep it explicit
+about this.
+
 ## 5. Operational hygiene — the loot directory
 
 `loot/` contains real captured credentials, decrypted task sequences, PFX
@@ -209,8 +227,14 @@ uv pip install -r requirements.txt
   it.
 - `attack` against a real target requires reachability to UDP/67 + UDP/69 on
   the DP, or a SOCKS5 path that allows UDP ASSOCIATE.
+- If `uv pip install` seems to succeed but imports still fail, check
+  `VIRTUAL_ENV` / `uv pip list` — a stray `VIRTUAL_ENV` env var from the shell
+  can make `uv` silently install into a *different* venv than the project's
+  local `.venv`. Pin it explicitly if needed:
+  `VIRTUAL_ENV=<repo>/.venv uv pip install --python .venv/bin/python3 -r requirements.txt`.
 - There is no test suite. `test_udp_socks.py` is a manual harness, not pytest.
-  Don't claim "tests pass" — say what you actually ran.
+  Don't claim "tests pass" — say what you actually ran. See §11 below for how
+  to actually test this codebase.
 
 ## 7. Coding conventions
 
@@ -244,7 +268,53 @@ uv pip install -r requirements.txt
 - Prefer `git -C <path>` over `cd <path> && git ...`.
 - Prefer Read / Grep / Glob over `cat`, `find`, `grep`.
 
-## 10. When in doubt
+## 10. Testing this codebase
+
+There's no pytest suite and most of `pxehacker.py`'s subcommands need either
+a real SCCM DP or protocol-level infrastructure this environment usually
+doesn't have. "It works" claims need actual evidence, not code review — the
+expected bar is testing *every* subcommand/function individually, not just
+the ones touched by a change (see the 2026-08-27 session where several
+subcommands had quietly gone untested for multiple sessions, and one of them
+turned out to have a real bug — §4.11). Techniques that work well here,
+built as throwaway scripts in the scratchpad directory (not committed):
+
+- **Pure functions** (`lib/sccm.py` crypto/key-derivation helpers,
+  `build_sccm_hash`, `generate_random_mac`, etc.) — call directly with
+  synthetic byte buffers matching the real header/blob layout. Get the field
+  offsets right; a wrong-length placeholder (e.g. a 20-byte key where 40 is
+  expected) silently corrupts every field after it and produces a confusing
+  downstream error that looks like a real bug.
+- **`.boot.var` files** — build a 24-byte header (with the ALG_ID at the
+  right offset) + AES/3DES-CBC-encrypted, PKCS7-padded plaintext + 8-byte
+  trailer, encrypted with a real `aes_des_key_derivation()`-derived key so
+  `decrypt_media_file`/`try_weak_passwords` can be exercised end-to-end.
+- **CMS/PKCS7 policy blobs** (for `policies-local`, `_cms_decrypt`) — hand-roll
+  the ASN1 DER structure (a small `der_tlv`/`der_oid` helper is enough) with a
+  real RSA keypair for PKCS1v15 key transport and AES-CBC content encryption.
+  `_cms_decrypt` only skips the RecipientIdentifier bytes, it doesn't
+  validate them, so they can be arbitrary.
+- **Credential-string obfuscation blobs** (`deobfuscate_credential_string` /
+  `policy.py`'s twin) — build with *real* PKCS7 padding, not null-byte
+  padding. Null padding masks bugs in padding-handling code (this is
+  literally how §4.11's bug went undetected in an earlier test).
+- **`SOCKS5Client`** — stand up a minimal local SOCKS5 server (TCP
+  negotiation + UDP ASSOCIATE + a UDP relay that echoes back what it
+  receives) in a background thread. Confirms the full protocol path and that
+  the UDP relay socket is reused across sends, not recreated (§4.6).
+- **`discover` / DHCP-dependent code** — `PXEDiscovery.setup_interface()`
+  works for real without root (just reads interface/IP/MAC). For
+  `discover()` itself, monkeypatch `srp` as imported into
+  `lib.discovery`'s namespace with a function returning a synthetic
+  `(sent, scapy Ether/IP/UDP/BOOTP/DHCP response)` pair — this exercises the
+  offer-scoring/parsing logic without a real broadcast domain.
+- **What's genuinely untestable without real infrastructure**: a live DHCP
+  broadcast (`discover` needs root + an actual L2 segment), and the SOCKS5
+  path through a real C2 beacon (a local test server proves the protocol
+  implementation is correct, not that a specific beacon's SOCKS5 relay
+  behaves the same way). Say so explicitly rather than implying full coverage.
+
+## 11. When in doubt
 
 - Read `README.md` for the operator-facing flow and the upstream lineage table.
 - If a behaviour seems wrong, clone the relevant upstream project (see the
