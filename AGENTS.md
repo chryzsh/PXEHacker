@@ -147,7 +147,19 @@ in `pxehacker.py`, `os.urandom(16)` for the machine identifier in
 `--mac` to pin a specific MAC when an engagement requires it. Don't
 reintroduce a fixed value for either.
 
-### 4.12 Legacy CALG_3DES cryptokey wrapping is unverified
+### 4.12 `attack` and `policies` logic lives in `run_attack()` / `run_policies()`, not inline in `main()`
+`main()`'s `if args.mode == "attack":` / `"policies"` blocks are thin dispatch
+wrappers around `run_attack(args)` and `run_policies(args)` (both return
+`True`/`False`, not `sys.exit()`). This exists so `auto` mode can call both in
+sequence: `run_attack()` then, on success, build a `policies`-shaped
+`argparse.Namespace` and call `run_policies()`. If you're changing attack or
+policy-retrieval behavior, edit the function, not a mode block — the mode
+blocks are just plumbing now. `auto` deliberately does not chain into
+`policies` when `run_attack()` returns `False` (e.g. password-protected media
+with no weak-password match) — there's no decrypted `variables.xml` to feed
+it yet.
+
+### 4.13 Legacy CALG_3DES cryptokey wrapping is unverified
 `SCCM.derive_blank_decryption_key()` has a 3DES branch (`inner_alg_id ==
 0x6603`) ported from `blurbdust/PXEThief` for older sites that wrap the
 blank-password cryptokey with 3DES instead of AES. It has never been tested
