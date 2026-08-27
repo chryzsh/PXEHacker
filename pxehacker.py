@@ -84,7 +84,11 @@ auto_parser.add_argument(
 # Decrypt mode — decrypt a local .boot.var file with a key
 decrypt_parser = subparsers.add_parser("decrypt", help="Decrypt a locally downloaded .boot.var file")
 decrypt_parser.add_argument("file", help="Path to the .boot.var file")
-decrypt_parser.add_argument("key", help="Decryption key (hex)")
+decrypt_parser.add_argument(
+    "key",
+    help="Password bytes in hex (not the raw AES key) — output of 'derive-key', or a cracked "
+         "password UTF-16LE-encoded and hex'd. Gets re-derived into the AES key internally.",
+)
 decrypt_parser.add_argument("-o", "--output", help="Output directory for loot files", type=str, default="./loot")
 
 # Hash mode — extract SCCM hash from local .boot.var file

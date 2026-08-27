@@ -235,6 +235,15 @@ class SCCM:
         aes = AES.new(key, AES.MODE_CBC, b"\x00" * 16)
         return aes.decrypt(data)
 
+    @staticmethod
+    def _pkcs7_unpad(data, block_size):
+        if not data:
+            return data
+        pad_len = data[-1]
+        if 0 < pad_len <= block_size and data.endswith(bytes([pad_len]) * pad_len):
+            return data[:-pad_len]
+        return data
+
     def deobfuscate_credential_string(self, credential_string):
         """Deobfuscate SCCM secret="1" credential strings (NAA, collection vars, etc).
         Supports CALG_3DES (0x6603), CALG_AES_128 (0x660E), CALG_AES_192 (0x660F),
@@ -251,10 +260,12 @@ class SCCM:
         if alg_id == 0x6603:
             last = (len(encrypted_data) // 8) * 8
             decrypted = self._3des_decrypt(encrypted_data[:last], key[:24])
+            decrypted = self._pkcs7_unpad(decrypted, 8)
         elif alg_id in (0x660E, 0x660F, 0x6610):
             key_lengths = {0x660E: 16, 0x660F: 24, 0x6610: 32}
             last = (len(encrypted_data) // 16) * 16
             decrypted = self._aes_decrypt_raw(encrypted_data[:last], key[:key_lengths[alg_id]])
+            decrypted = self._pkcs7_unpad(decrypted, 16)
         else:
             raise ValueError(f"Unsupported ALG_ID: 0x{alg_id:04x}")
 

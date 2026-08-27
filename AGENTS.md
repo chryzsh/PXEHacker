@@ -136,7 +136,21 @@ with hashcat modes `19850`/`19851` from `chryzsh/hashcat-6.2.6-SCCM` (see
 `pxehacker.py`'s `HASHCAT_MODES` / `print_hashcat_command`) — don't strip the
 mode number back out, operators need the ready-to-run command.
 
-### 4.11 MAC and PXE machine identifier are randomized per run — don't hardcode them back
+### 4.11 Credential-string obfuscation is PKCS7-padded — always unpad before decode
+`lib/sccm.py`'s `SCCM.deobfuscate_credential_string()` (used by `deobfuscate`
+and `deobfuscate_naa_xml`) decrypts a `secret="1"` credential blob and used to
+just do `text[:text.rfind('\x00')]` to strip padding. Real SCCM credential
+strings are PKCS7-padded, and PKCS7 padding bytes are essentially never
+`\x00` — so that heuristic left the padding bytes decoded as garbage
+characters (found: literal Thai script glyphs) appended to real passwords.
+Found 2026-08-27 by testing the CLI directly with realistic PKCS7-padded
+input (an earlier synthetic test had accidentally used null-byte padding,
+which masked the bug). Fixed by adding `_pkcs7_unpad()` — mirrors
+`lib/policy.py`'s `_deobfuscate_credential_string`, which already had this
+right. If you touch either implementation, keep the unpad step; don't drop
+back to the null-truncation-only heuristic.
+
+### 4.12 MAC and PXE machine identifier are randomized per run — don't hardcode them back
 `attack` used to send a literal `chaddr=11:22:33:44:55:66`, and `lib/sccm.py` /
 `lib/discovery.py` both sent the exact same static 16-byte
 `pxe_client_machine_identifier` (DHCP option 97) on every request. That's a
@@ -147,7 +161,7 @@ in `pxehacker.py`, `os.urandom(16)` for the machine identifier in
 `--mac` to pin a specific MAC when an engagement requires it. Don't
 reintroduce a fixed value for either.
 
-### 4.12 `attack` and `policies` logic lives in `run_attack()` / `run_policies()`, not inline in `main()`
+### 4.13 `attack` and `policies` logic lives in `run_attack()` / `run_policies()`, not inline in `main()`
 `main()`'s `if args.mode == "attack":` / `"policies"` blocks are thin dispatch
 wrappers around `run_attack(args)` and `run_policies(args)` (both return
 `True`/`False`, not `sys.exit()`). This exists so `auto` mode can call both in
@@ -159,7 +173,7 @@ blocks are just plumbing now. `auto` deliberately does not chain into
 with no weak-password match) — there's no decrypted `variables.xml` to feed
 it yet.
 
-### 4.13 Legacy CALG_3DES cryptokey wrapping is unverified
+### 4.14 Legacy CALG_3DES cryptokey wrapping is unverified
 `SCCM.derive_blank_decryption_key()` has a 3DES branch (`inner_alg_id ==
 0x6603`) ported from `blurbdust/PXEThief` for older sites that wrap the
 blank-password cryptokey with 3DES instead of AES. It has never been tested

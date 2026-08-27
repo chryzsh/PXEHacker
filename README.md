@@ -130,6 +130,8 @@ Decrypt a previously downloaded `.boot.var` / `variables.dat` file with a known 
 .venv/bin/python pxehacker.py decrypt <file> <key_hex> [-o OUTPUT]
 ```
 
+`<key_hex>` is **not** the raw AES key — it's password bytes in hex that get re-derived into the AES key internally (the same CryptDeriveKey step used for everything else here). Feed it either `derive-key`'s output directly, or a cracked password UTF-16LE-encoded and hex'd (e.g. `python3 -c "print('password'.encode('utf-16-le').hex())"`).
+
 ### `derive-key` — Derive blank-password key from a captured DHCP cryptokey
 
 Use when you only have a `.boot.var` file but captured the PXE server's DHCP response separately (e.g. via Wireshark). Takes the encrypted cryptokey blob from DHCP option 243 sub-record type 2 and prints the AES key for offline decryption.
