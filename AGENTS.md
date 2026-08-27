@@ -11,13 +11,14 @@ tools:
 
 - **PXEThief** (MWR CyberSec, GPL-3.0) — the original mode-1/mode-2 reference
   implementation. Windows-centric, uses `win32crypt`, depends on `lxml`.
-- **cred1py** (SpecterOps, license unresolved — see `PROVENANCE.md`) — cleaner
-  architecture, SOCKS5 support, AES-256 auto-detection, pure-Python CMS.
+- **cred1py** (SpecterOps, no published license) — cleaner architecture,
+  SOCKS5 support, AES-256 auto-detection, pure-Python CMS.
 
 The intent is one tool that runs on a Kali/Linux operator box (and through a
-C2 SOCKS5 channel), without `win32crypt` and without `lxml`. The forks live in
-the `cred1py/`, `PXEThief/`, and `pxethiefy/` directories (these are not
-imported — they are reference material only).
+C2 SOCKS5 channel), without `win32crypt` and without `lxml`. See the README's
+lineage table for the full list of upstream/sibling projects this draws from —
+none of their source trees are vendored into this repo; logic is
+re-implemented and attributed in code comments.
 
 This is built for **authorized red team / pentest engagements** against SCCM.
 
@@ -42,12 +43,11 @@ lib/
 requirements.txt        scapy, pycryptodome, cryptography, requests,
                         requests-toolbelt. No lxml. No pywin32.
 loot/                   Operational output — gitignored. NEVER commit.
-PROVENANCE.md           Licensing notes — read before redistributing.
-README.md               User docs.
+README.md               User docs, including the upstream lineage table.
 ```
 
-Subdirectories `cred1py/`, `PXEThief/`, `pxethiefy/` are reference forks. Treat
-them as read-only history; do not import from them. When porting a feature,
+There are no vendored reference-fork subdirectories in this repo — upstream
+projects are cloned to a scratch location when needed and not committed. When porting a feature,
 re-implement it in `lib/` and credit the source in a comment.
 
 ## 3. CLI subcommands (what `pxehacker.py` exposes)
@@ -206,8 +206,8 @@ uv pip install -r requirements.txt
   clever abstractions. One reasonable function beats three "extensible" ones.
 - Print operator-facing status with the existing `[*]` / `[!]` / `[+]`
   conventions — these get read live in an engagement.
-- When porting from `PXEThief/` or `cred1py/`, leave a short comment naming
-  the source so the next reader can diff against upstream.
+- When porting from an upstream project (see the README lineage table), leave
+  a short comment naming the source so the next reader can diff against it.
 
 ## 8. Git and commits
 
@@ -232,10 +232,9 @@ uv pip install -r requirements.txt
 
 ## 10. When in doubt
 
-- Read `PROVENANCE.md` before suggesting anything about redistribution.
-- Read `README.md` for the operator-facing flow.
-- The `cred1py/` and `PXEThief/` directories are the source of truth for the
-  original logic — if a behaviour seems wrong, diff against them before
-  "fixing" it.
+- Read `README.md` for the operator-facing flow and the upstream lineage table.
+- If a behaviour seems wrong, clone the relevant upstream project (see the
+  README lineage table for URLs) to a scratch location and diff against it
+  before "fixing" it — don't guess.
 - Ask the operator. This is a security tool; silent assumptions are worse
   than a clarifying question.

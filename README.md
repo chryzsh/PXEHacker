@@ -4,6 +4,29 @@ SCCM PXE exploitation tool for authorized red team and penetration testing engag
 
 Merges the best of [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR CyberSec) and [cred1py](https://github.com/SpecterOps/cred1py) (SpecterOps) into a unified Linux-first CLI tool.
 
+## Disclaimer: this is a catch-all, not a novel technique
+
+The SCCM PXE credential attack (CRED-1) is not new, and PXEHacker did not invent it. By 2026 the tooling for it had fragmented across half a dozen independently maintained repositories — a Windows-only original, a couple of Linux ports, and several active forks — each carrying a different subset of fixes (AES-256 support, weak-password auto-try, legacy 3DES handling, hashcat integration) with no single one being a strict superset of the rest. Running the attack meant knowing which fork had which fix.
+
+PXEHacker exists to be that superset: one Linux-first, pure-Python, actively-maintained tool that periodically re-absorbs whatever genuinely new fixes or features show up in the projects below, so operators don't have to track five repos to get the current best version of any one capability. It is authorized-use-only tooling for red team and penetration testing engagements.
+
+## Where this fits — the SCCM PXE tooling lineage
+
+In the order each project appeared:
+
+| Date | Project | Contribution |
+|------|---------|---------------|
+| 2022-07 | [xpn/sccmwtf](https://github.com/xpn/sccmwtf) | Client-registration NAA credential harvesting — a different, non-PXE technique. Reviewed, not integrated (see [Out of Scope](#out-of-scope-windows-only-features)). |
+| 2022-08 | [PXEThief](https://github.com/MWR-CyberSec/PXEThief) (MWR CyberSec) | The original tool and direct ancestor of everything below — Windows-only, `win32crypt`/`lxml`-dependent, modes 1-8. GPL-3.0. |
+| 2023-10 | [pxethiefy](https://github.com/csandker/pxethiefy) (Christian Sandker) | First Linux port — dropped `win32crypt` for the PXE-request path. |
+| 2023-11 | [Misconfiguration Manager](https://github.com/subat0mik/Misconfiguration-Manager) | Not a tool, but the tradecraft/research reference (CRED-1 attack path) this whole lineage implements. |
+| 2024-04 | [hashcat-6.2.6-SCCM](https://github.com/The-Viper-One/hashcat-6.2.6-SCCM) (The-Viper-One) | Companion cracking tool — a hashcat fork adding mode `19850` for these password-protected media hashes. |
+| 2024-09 | [cred1py](https://github.com/SpecterOps/cred1py) (SpecterOps) | SOCKS5-enabled CRED-1 proof-of-concept — cleaner architecture, AES-256 auto-detection, pure-Python CMS/PKCS7. License unresolved upstream. |
+| 2024-10 | [PXEThief (blurbdust fork)](https://github.com/blurbdust/PXEThief) | Actively-maintained fork of the original — AES-256, dynamic hash-type detection, legacy CALG_3DES cryptokey handling. |
+| 2025-04 | [pxethiefup](https://github.com/evildaemond/pxethiefup) (Adam Jon Foster) | Another actively-maintained fork — weak/default password auto-try, hashcat-mode wiring. |
+| 2026-03 | [hashcat-6.2.6-SCCM (chryzsh fork)](https://github.com/chryzsh/hashcat-6.2.6-SCCM) | Extends The-Viper-One's module with AES-256 support (mode `19851`). |
+| 2026-03 | **PXEHacker** (this project) | Merges `cred1py` + `PXEThief` as the base, then continues absorbing genuinely new fixes from the forks above as they appear. |
+
 ## Features
 
 - **SOCKS5 proxy support** — Run attacks through C2 beacons (Cobalt Strike, etc.)
@@ -327,25 +350,12 @@ Also out of scope: **client-registration-based NAA credential harvesting** (`scc
 
 ## Credits
 
-- [PXEThief](https://github.com/MWR-CyberSec/PXEThief) by Christopher Panayi (MWR CyberSec) — original Windows PXE attack tool
-- [cred1py](https://github.com/SpecterOps/cred1py) by SpecterOps — SOCKS5-enabled CRED-1 implementation
-- [pxethiefy](https://github.com/csandker/pxethiefy) by Christian Sandker — Linux port of PXEThief
-- [pxethiefup](https://github.com/evildaemond/pxethiefup) by Adam Jon Foster — weak/default password auto-try, hashcat mode wiring
-- [PXEThief (blurbdust fork)](https://github.com/blurbdust/PXEThief) — legacy CALG_3DES cryptokey handling
-- [Misconfiguration Manager](https://github.com/subat0mik/Misconfiguration-Manager) — SCCM attack research
-- DEF CON 30 talk: "Pulling Passwords out of Configuration Manager"
+Full attribution and dates are in the [lineage table](#where-this-fits--the-sccm-pxe-tooling-lineage) above. Also worth a direct mention:
 
-## Provenance
-
-This project was developed with assistance from a large language model under human direction. A human operator defined the goals, reviewed the code, chose the changes, and validated the results.
+- DEF CON 30 talk: "Pulling Passwords out of Configuration Manager" — the original public disclosure of this attack path
 
 ## License
 
 This tool is for authorized security testing only. Ensure you have written authorization before using against any target.
 
-License status is not fully settled for all upstream-derived portions of this repository:
-
-- `PXEThief` is GPL-3.0. This repository contains code and logic derived from PXEThief.
-- No license file was found in the local `cred1py` snapshot, and the upstream GitHub repository metadata did not report a license as of March 7, 2026.
-
-See [PROVENANCE.md](./PROVENANCE.md) for the attribution and license review notes before redistributing this repository publicly.
+This project was built with LLM assistance under human direction, drawing on the lineage of tools listed above; `PXEThief` is GPL-3.0, and `cred1py`/`pxethiefy` don't publish a license upstream as of this writing.

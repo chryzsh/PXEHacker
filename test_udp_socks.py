@@ -6,7 +6,6 @@ import struct
 import socket
 import binascii
 
-sys.path.insert(0, '/home/chrisr/share/dev/PXEHacker')
 from lib.socks import SOCKS5Client
 
 def build_dns_query(domain):
